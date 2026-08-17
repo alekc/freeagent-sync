@@ -74,7 +74,10 @@ snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
 changelog:
-  use: github
+  # Built from local git log, not the API. The release job checks out full
+  # history anyway, and asking GitHub to compare two tags made the release
+  # depend on an endpoint that 404'd and failed v0.1.1 outright.
+  use: git
   sort: asc
   groups:
     - title: Features
