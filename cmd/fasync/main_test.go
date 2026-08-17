@@ -205,8 +205,51 @@ func TestStatusCarriesTheFilesAreaCaveat(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	h := newHarness(t)
-	if out := h.mustRun("version"); strings.TrimSpace(out) != Version {
-		t.Errorf("version = %q, want %q", strings.TrimSpace(out), Version)
+	if out := h.mustRun("version"); strings.TrimSpace(out) != version() {
+		t.Errorf("version = %q, want %q", strings.TrimSpace(out), version())
+	}
+}
+
+// A `go install` build gets no ldflag, so the module version recorded in the
+// binary is the only thing that can name the release. Reporting "dev" there
+// left users unable to say which version they were running (issue #1).
+func TestResolveVersion(t *testing.T) {
+	build := func(v string, ok bool) func() (string, bool) {
+		return func() (string, bool) { return v, ok }
+	}
+
+	tests := []struct {
+		name    string
+		stamped string
+		build   func() (string, bool)
+		want    string
+	}{
+		{"a stamped version wins", "0.1.0", build("v9.9.9", true), "0.1.0"},
+		{"the Makefile's git describe v is trimmed", "v0.1.0", build("", false), "0.1.0"},
+		{"go install falls back to the module version", "dev", build("v0.1.0", true), "0.1.0"},
+		{"a pseudo-version survives intact", "dev",
+			build("v0.0.0-20260817120000-abcdef123456", true),
+			"0.0.0-20260817120000-abcdef123456"},
+		{"devel is no better than unstamped", "dev", build("(devel)", true), "dev"},
+		{"an empty module version is ignored", "dev", build("", true), "dev"},
+		{"a binary with no build info", "dev", build("", false), "dev"},
+		{"an empty stamp never prints an empty version", "", build("", false), "dev"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveVersion(tc.stamped, tc.build); got != tc.want {
+				t.Errorf("resolveVersion(%q) = %q, want %q", tc.stamped, got, tc.want)
+			}
+		})
+	}
+}
+
+// The User-Agent is what FreeAgent sees, so it must carry the same version the
+// CLI reports rather than the raw unstamped sentinel.
+func TestUserAgentCarriesTheResolvedVersion(t *testing.T) {
+	if !strings.Contains(userAgent, "fasync/"+version()) {
+		t.Errorf("userAgent = %q, want it to carry %q", userAgent, version())
 	}
 }
 

@@ -16,8 +16,9 @@ import (
 	"github.com/alekc/freeagent-sync/internal/ui"
 )
 
-// userAgent identifies this tool to FreeAgent.
-var userAgent = "fasync/" + Version + " (+https://github.com/alekc/freeagent-sync)"
+// userAgent identifies this tool to FreeAgent. Built from version(), not from
+// Version, so a `go install` build does not announce itself as "dev".
+var userAgent = "fasync/" + version() + " (+https://github.com/alekc/freeagent-sync)"
 
 // session is everything a command that talks to the API needs, assembled in
 // one place so pull, reconcile and probe cannot drift apart.

@@ -11,7 +11,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"slices"
+	"strings"
 	"syscall"
 
 	"github.com/alekc/freeagent-sync/internal/config"
@@ -19,8 +21,43 @@ import (
 	"github.com/alekc/freeagent-sync/internal/ui"
 )
 
-// Version is stamped at build time; see the Makefile.
+// Version is stamped at build time; see the Makefile. Nothing stamps a
+// `go install` build, so read it through version() rather than directly.
 var Version = "dev"
+
+// unstamped is what Version holds when no build stamped it.
+const unstamped = "dev"
+
+// version is the version the CLI reports and sends as its User-Agent.
+func version() string { return resolveVersion(Version, moduleVersion) }
+
+// resolveVersion prefers the stamped value and falls back to the module
+// version the toolchain records, which is all a `go install` build has.
+//
+// The leading v is trimmed because the three sources disagree: goreleaser
+// stamps 0.1.0, the Makefile stamps git describe output, and the toolchain
+// records v0.1.0. Reporting a shape that depends on the build is worse than
+// picking one, and 0.1.0 is what releases already print.
+func resolveVersion(stamped string, fromBuild func() (string, bool)) string {
+	if stamped != "" && stamped != unstamped {
+		return strings.TrimPrefix(stamped, "v")
+	}
+	// "(devel)" is the toolchain's own placeholder, no better than unstamped.
+	if built, ok := fromBuild(); ok && built != "" && built != "(devel)" {
+		return strings.TrimPrefix(built, "v")
+	}
+	return unstamped
+}
+
+// moduleVersion reports the main module's version as recorded in the binary.
+// `go install pkg@version` fills it in; a plain `go build` does not.
+func moduleVersion() (string, bool) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", false
+	}
+	return info.Main.Version, true
+}
 
 // Exit codes. Distinct so a cron job can tell a broken run from one flaky
 // family, rather than reading every line of the mail it just sent.
@@ -94,7 +131,7 @@ func isHelp(arg string) bool {
 }
 
 func usage(w io.Writer) {
-	fprintf(w, "fasync %s: mirror a FreeAgent company locally\n\n", Version)
+	fprintf(w, "fasync %s: mirror a FreeAgent company locally\n\n", version())
 	fprintln(w, "Usage: fasync <command> [flags]")
 	fprintln(w, "\nCommands:")
 	for _, name := range sortedCommands() {
@@ -259,6 +296,6 @@ func fprintln(w io.Writer, args ...any) {
 }
 
 func cmdVersion(_ context.Context, e *env, _ []string) int {
-	fprintln(e.out, Version)
+	fprintln(e.out, version())
 	return exitOK
 }
