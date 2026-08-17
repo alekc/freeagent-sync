@@ -1,0 +1,49 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+    - revive
+    - sqlclosecheck
+    - rowserrcheck
+    - unconvert
+    - usestdlibvars
+    - wastedassign
+  settings:
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+    gosec:
+      excludes:
+        # G104 duplicates errcheck, which is already on by default.
+        - G104
+  exclusions:
+    rules:
+      # Test helpers write to buffers that never usefully fail, and the
+      # assertions are what the test is actually checking.
+      - path: _test\.go$
+        linters:
+          - errcheck
+          - gosec
+          - noctx
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/alekc/freeagent-sync

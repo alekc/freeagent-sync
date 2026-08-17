@@ -1,0 +1,14 @@
+/bin/
+# goreleaser output, rebuilt from scratch on every run.
+/dist/
+coverage.txt
+
+# Local archives and scratch data. The tool defaults to XDG paths, but a
+# --data-dir pointed at the checkout must never become a commit.
+/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+.envrc
+.DS_Store

@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  # actions/setup-go pins GOTOOLCHAIN=local, which turns the go.mod toolchain
+  # directive into a hard error instead of a download.
+  GOTOOLCHAIN: auto
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to create the release and upload its archives.
+      contents: write
+      # Needed to push the container image to GHCR.
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # goreleaser reads the tag history to build the changelog, so a
+          # shallow clone would produce an empty one.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+
+      # The tag is what users install, so it does not ship unless the suite
+      # passes on the exact commit being released.
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      # buildx builds the manifest list. No QEMU: the binaries are
+      # cross-compiled by Go and the Dockerfile only copies one in, so nothing
+      # executes for a foreign platform.
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

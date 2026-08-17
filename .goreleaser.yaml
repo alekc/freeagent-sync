@@ -1,0 +1,118 @@
+version: 2
+
+project_name: fasync
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: fasync
+    main: ./cmd/fasync
+    binary: fasync
+    # The SQLite driver is pure Go, so every target cross-compiles from one
+    # linux runner. No cgo, no QEMU, no per-arch toolchain.
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.Version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+      - docs/*
+
+# One entry, both platforms, one manifest list. The binaries are already
+# cross-compiled above and the Dockerfile only copies one in, so nothing runs
+# inside the image during the build and no QEMU is involved.
+dockers_v2:
+  - id: fasync
+    ids: [fasync]
+    images:
+      - ghcr.io/alekc/freeagent-sync
+    tags:
+      - "{{ .Version }}"
+      - "{{ .Major }}.{{ .Minor }}"
+      # Only for a real release, so a prerelease tag never becomes latest.
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    dockerfile: Dockerfile
+    labels:
+      org.opencontainers.image.title: fasync
+      org.opencontainers.image.description: >-
+        Mirrors a FreeAgent company into a local SQLite archive with its
+        attachments.
+      org.opencontainers.image.url: https://github.com/alekc/freeagent-sync
+      org.opencontainers.image.source: https://github.com/alekc/freeagent-sync
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: MIT
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^feat(\(.+\))?!?:'
+      order: 0
+    - title: Fixes
+      regexp: '^fix(\(.+\))?!?:'
+      order: 1
+    - title: Other
+      order: 99
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+
+release:
+  draft: false
+  # A tag with a prerelease suffix marks the release as one, so -rc1 does not
+  # become the version people get by default.
+  prerelease: auto
+  footer: |
+    ## Install
+
+    Download the archive for your platform, verify it against `checksums.txt`,
+    and put `fasync` on your PATH. Or:
+
+    ```
+    go install github.com/alekc/freeagent-sync/cmd/fasync@{{ .Tag }}
+    ```
+
+    Or as a container, for linux/amd64 and linux/arm64:
+
+    ```
+    docker run --rm -v fasync-data:/data -v fasync-config:/config \
+      ghcr.io/alekc/freeagent-sync:{{ .Version }} status
+    ```
+
+    `/data` is the archive, `/config` the OAuth token. The README covers the
+    one-time authorisation, which has to happen on a host with a browser.

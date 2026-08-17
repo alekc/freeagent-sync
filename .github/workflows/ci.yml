@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # actions/setup-go pins GOTOOLCHAIN=local, which turns the go.mod toolchain
+  # directive into a hard error instead of a download. Force auto so the
+  # matrix version is what actually runs.
+  GOTOOLCHAIN: auto
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Tracks the current release, matching the SDK this builds on.
+        go: ["1.26.x"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+      - run: go build ./...
+      - run: go test -race -count=1 -coverprofile=coverage.txt -covermode=atomic ./...
+      - name: Coverage summary
+        run: go tool cover -func=coverage.txt | tail -n 1
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      # Must be built with a Go at least as new as the module's directive, or
+      # it refuses to load the config.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - run: go mod tidy
+      - name: Fail if go.mod or go.sum changed
+        run: git diff --exit-code -- go.mod go.sum
+
+  # A tag push is a bad time to discover the release config is broken or that
+  # something stopped cross-compiling, so both are exercised on every PR.
+  release-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      # buildx so the image build in the dry run below is exercised too.
+      - uses: docker/setup-buildx-action@v4
+
+      # release rather than build, so the Dockerfile and the image config are
+      # checked as well: a tag push is a bad time to find out either is wrong.
+      # Nothing is published, and no registry credentials are involved.
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --snapshot --skip=publish --skip=announce --clean
