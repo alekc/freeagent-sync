@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/jedib0t/go-pretty/v6/table"
@@ -27,7 +29,8 @@ func cmdSQL(ctx context.Context, e *env, args []string) int {
 	fs := newFlagSet("sql", e)
 	e.g.register(fs)
 	limit := fs.Int("limit", 200, "maximum rows to print (0: no limit)")
-	format := fs.String("format", "table", "output format: table, tsv or csv")
+	format := fs.String("format", "table",
+		"output format: table, tsv or csv (csv and tsv are RFC 4180 quoted)")
 	positional, err := e.parse(fs, args)
 	if err != nil {
 		return e.fail(err)
@@ -91,11 +94,27 @@ func (e *env) printRows(rows *sql.Rows, format string, limit int) int {
 	}
 
 	var t table.Writer
+	var delimited *csv.Writer
 	if format == "table" {
 		t = newTable(e)
 		t.AppendHeader(toRow(columns))
 	} else {
-		fprintln(e.out, strings.Join(columns, separatorFor(format)))
+		delimited, err = newDelimitedWriter(e.out, format)
+		if err != nil {
+			return e.fail(err)
+		}
+		if err := delimited.Write(columns); err != nil {
+			return e.fail(fmt.Errorf("writing the header: %w", err))
+		}
+	}
+
+	// csv.Writer buffers, so an error partway through has to flush what it
+	// already took or stdout ends mid-field: whole records only (issue #3).
+	failFlushed := func(err error) int {
+		if delimited != nil {
+			delimited.Flush()
+		}
+		return e.fail(err)
 	}
 
 	var printed int
@@ -105,21 +124,26 @@ func (e *env) printRows(rows *sql.Rows, format string, limit int) int {
 		}
 		values, err := scanRow(rows, len(columns))
 		if err != nil {
-			return e.fail(err)
+			return failFlushed(err)
 		}
 		if t != nil {
 			t.AppendRow(toRow(values))
-		} else {
-			fprintln(e.out, strings.Join(values, separatorFor(format)))
+		} else if err := delimited.Write(values); err != nil {
+			return failFlushed(fmt.Errorf("writing a row: %w", err))
 		}
 		printed++
 	}
 	if err := rows.Err(); err != nil {
-		return e.fail(err)
+		return failFlushed(err)
 	}
 
 	if t != nil {
 		t.Render()
+	} else {
+		delimited.Flush()
+		if err := delimited.Error(); err != nil {
+			return e.fail(fmt.Errorf("writing the output: %w", err))
+		}
 	}
 	if limit > 0 && printed == limit {
 		// Silence here would read as "that is all there is", which is the one
@@ -166,9 +190,20 @@ func toRow(values []string) table.Row {
 	return row
 }
 
-func separatorFor(format string) string {
-	if format == "csv" {
-		return ","
+// newDelimitedWriter quotes any value holding the separator, a double quote or
+// a newline. Joining on a bare separator instead shifted every later column,
+// and stayed quiet about it (issue #3).
+func newDelimitedWriter(out io.Writer, format string) (*csv.Writer, error) {
+	w := csv.NewWriter(out)
+	switch format {
+	case "csv":
+		w.Comma = ','
+	case "tsv":
+		w.Comma = '\t'
+	default:
+		// cmdSQL validates the flag, so reaching here means a new format was
+		// added without wiring a separator. Guessing one would emit CSV.
+		return nil, fmt.Errorf("no separator for format %q", format)
 	}
-	return "\t"
+	return w, nil
 }
