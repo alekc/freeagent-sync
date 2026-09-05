@@ -8,6 +8,7 @@ import (
 
 	"github.com/alekc/freeagent"
 
+	"github.com/alekc/freeagent-sync/internal/family"
 	"github.com/alekc/freeagent-sync/internal/store"
 	"github.com/alekc/freeagent-sync/internal/ui"
 )
@@ -88,7 +89,7 @@ func (e *Engine) Probe(ctx context.Context, names []string) ([]ProbeResult, erro
 }
 
 func (e *Engine) probeFamily(
-	ctx context.Context, meta freeagent.ResourceMeta, scopes map[Class][]scope,
+	ctx context.Context, meta freeagent.ResourceMeta, scopes map[family.Class][]scope,
 ) ProbeResult {
 	out := ProbeResult{Family: meta.Name}
 
@@ -96,7 +97,7 @@ func (e *Engine) probeFamily(
 	// that says nothing about the API, so it is not asked.
 	if !Probeable(meta) {
 		out.Result = ProbeNotApplicable
-		out.Detail = Classify(meta).String() + " families have nothing to filter"
+		out.Detail = family.Classify(meta).String() + " families have nothing to filter"
 		return out
 	}
 
@@ -156,18 +157,18 @@ func (e *Engine) probeFamily(
 // refuses the request without it. One is enough: the question is whether the
 // endpoint honours the filter, not what any particular scope contains.
 func (e *Engine) probeScope(
-	ctx context.Context, meta freeagent.ResourceMeta, scopes map[Class][]scope,
+	ctx context.Context, meta freeagent.ResourceMeta, scopes map[family.Class][]scope,
 ) (probeNarrowing, bool) {
-	class := Classify(meta)
+	class := family.Classify(meta)
 	switch class {
-	case ClassBankScoped, ClassParentScoped:
+	case family.ClassBankScoped, family.ClassParentScoped:
 		available := scopes[class]
 		if len(available) == 0 {
 			return probeNarrowing{}, false
 		}
 		return probeNarrowing{query: available[0].query}, true
 
-	case ClassUserScoped:
+	case family.ClassUserScoped:
 		available, err := e.userScopes(ctx, meta)
 		if err != nil || len(available) == 0 {
 			return probeNarrowing{}, false

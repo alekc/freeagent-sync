@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alekc/freeagent-sync/internal/family"
 	"github.com/alekc/freeagent-sync/internal/store"
 )
 
@@ -406,7 +407,7 @@ func TestPullRejectsAnUnsupportedFamily(t *testing.T) {
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("error = %v, want UnsupportedFamilyError", err)
 	}
-	if unsupported.Class != ClassChildOnly {
+	if unsupported.Class != family.ClassChildOnly {
 		t.Errorf("class = %s, want child-only", unsupported.Class)
 	}
 }

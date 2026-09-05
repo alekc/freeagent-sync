@@ -6,6 +6,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 
 	"github.com/alekc/freeagent-sync/internal/engine"
+	"github.com/alekc/freeagent-sync/internal/family"
 )
 
 func cmdProbe(ctx context.Context, e *env, args []string) int {
@@ -65,8 +66,8 @@ func cmdProbe(ctx context.Context, e *env, args []string) int {
 // coverageOf describes what happens to a family this build does not read
 // directly. Reporting "not yet" for attachments would be wrong: they are
 // archived, just through the records that carry them.
-func coverageOf(class engine.Class) string {
-	if class == engine.ClassChildOnly {
+func coverageOf(class family.Class) string {
+	if class == family.ClassChildOnly {
 		return "via parents"
 	}
 	return "not yet"
@@ -87,7 +88,7 @@ func cmdFamilies(_ context.Context, e *env, args []string) int {
 	t := newTable(e)
 	t.AppendHeader(table.Row{"#", "Family", "Class", "Archived"})
 	for i, meta := range archivable {
-		t.AppendRow(table.Row{i + 1, meta.Name, engine.Classify(meta), "yes"})
+		t.AppendRow(table.Row{i + 1, meta.Name, family.Classify(meta), "yes"})
 	}
 
 	deferred := engine.Deferred()
