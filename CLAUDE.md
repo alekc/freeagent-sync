@@ -38,13 +38,21 @@ one, and every attempt is appended to an audit file. That package is the whole
 write surface: if a change would let anything else write, it belongs there or
 nowhere.
 
-**It pins `X-Api-Version` to `2026-09-01`, and that pin is load-bearing.** It
-buys the attachments sub-resource, where `POST` appends and cannot replace. The
-cost is that from that version an explanation no longer carries a singular
-`attachment` attribute, so anything reading
+**It pins `X-Api-Version` to `2026-09-01`, and that pin changes what an
+explanation returns.** Under the SDK's `2026-08-16` default an explanation
+carries a singular `attachment` object; under the pin it carries an
+`attachments` array instead, so anything here reading
 `BankTransactionExplanation.Attachment` gets nil forever rather than an error.
 Do not write a guard against that field here: it would fail open while reading
-like protection. The attachment precondition is
+like protection. Both halves of that were measured against production on
+2026-09-05, not inferred from the docs.
+
+What the pin does **not** do is make the attachments sub-resource reachable.
+That endpoint answers under `2026-08-16` too, and the sandbox suite passes end
+to end under it, so do not treat the pin as the thing holding the write path
+up. Keep it anyway: `2026-09-01` is the documented minimum, today's leniency is
+not a contract, and stating the version means the 1 December 2026 default flip
+changes nothing here. The attachment precondition is
 `GET .../bank_transaction_explanations/:id/attachments`, and nothing in the
 package touches the `PUT` on that endpoint, which is where replacing a file and
 deleting one (a `_destroy` flag, not a `DELETE` verb) both live.

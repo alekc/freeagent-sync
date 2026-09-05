@@ -33,18 +33,23 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// apiVersion pins X-Api-Version for this client alone, which is what makes the
-// attachments sub-resource reachable: FreeAgent gates it behind 2026-09-01 and
-// the SDK otherwise sends its own older default.
+// apiVersion pins X-Api-Version for this client alone. FreeAgent documents the
+// attachments sub-resource as needing 2026-09-01, so this states it rather
+// than inheriting the SDK's older default, and 1 December 2026 changes nothing
+// here when that version becomes the default.
 //
-// The pin is deliberately not shared with the read client. From this version
-// an explanation no longer carries a singular attachment attribute, so a guard
-// reading that field would find nil every time and pass every call. Nothing
-// here reads it; the attachments sub-resource is the only source consulted.
+// What the pin does not do is make the endpoint reachable. Measured against
+// production on 2026-09-05, the sub-resource answers the same under the SDK's
+// 2026-08-16 default, and the sandbox suite passes end to end under it. The
+// documented minimum is still the contract; server leniency today is not a
+// promise for tomorrow, which is the reason to keep stating the version.
 //
-// From 1 December 2026 this becomes the API's default rather than an opt-in.
-// That changes nothing here, because the version is stated rather than
-// inherited.
+// What the pin does change, measured the same day, is the explanation body:
+// under 2026-08-16 it carries a singular attachment object, under 2026-09-01
+// an attachments array instead. That is why the pin is not shared with the
+// read client, and why a guard here reading the singular field would find nil
+// every time and pass every call. Nothing here reads it; the sub-resource is
+// the only source consulted.
 const apiVersion = "2026-09-01"
 
 // What FreeAgent will hold, documented on the attachments endpoint. The

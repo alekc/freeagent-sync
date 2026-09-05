@@ -454,8 +454,10 @@ own verbs when they do, never a flag on `pull`.
   value: creating an explanation re-reads the transaction and refuses unless a balance is
   still unexplained, and attaching a file appends to a sub-resource whose replace and delete
   operations the package does not reach. Every attempt is appended to an audit file. It pins
-  `X-Api-Version` to `2026-09-01` for that endpoint; the read client keeps the SDK default,
-  so the two see different attachment shapes on purpose. See section 17.
+  `X-Api-Version` to `2026-09-01`, the documented minimum for that endpoint; the read client
+  keeps the SDK default, so the two see different attachment shapes on purpose. The endpoint
+  answers under the older default too, measured 2026-09-05, so the pin states the contract
+  rather than unlocking the feature. See section 17.
 - Production is opt-in, per the SDK's existing convention.
 - Anonymised fixtures only. Real company data never enters the repo, a test, or a commit.
 - Secrets never land in the database. Tokens stay in the SDK's `0600` store.
@@ -485,7 +487,15 @@ Two accounts, and the split between them is the whole testing strategy.
   shape needs confirming.
 - **The sandbox company** from the SDK work is where the live suite runs. Build-tagged
   `integration`, never in PR CI, same discipline as the SDK: the read half refuses production
-  unless `FREEAGENT_ALLOW_PRODUCTION=1`, and there is no write half at all until phase 6.
+  unless `FREEAGENT_ALLOW_PRODUCTION=1`, and the write half
+  (`internal/explain/live_test.go`) refuses anything but the sandbox outright rather than
+  skipping, because the difference between the two is somebody's accounting records. It
+  creates a bank account of its own, uploads a one-line statement, explains it with a receipt
+  and asserts the file landed by reading it back with a different client, then deletes what it
+  made in reverse order. The guards are asserted against the real API rather than only the
+  fake: a same-name receipt comes back `ErrAlreadyAttached`, a second explanation comes back
+  `ErrAlreadyExplained`, and a differently-named second file is accepted, which is the case
+  the old single-slot guard could not express.
 
 Unit tests, no network:
 

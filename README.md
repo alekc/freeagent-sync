@@ -422,11 +422,15 @@ they are bounded so that neither can change anything already recorded:
 Nothing a person already decided can be overwritten or deleted, so the worst
 case is an unwanted record rather than a lost one.
 
-The write client pins `X-Api-Version: 2026-09-01`, which is what makes the
-append-only attachments endpoint available; FreeAgent makes that version the
-default on 1 December 2026, and stating it rather than inheriting it means that
-date changes nothing here. The read path is unaffected and stays on the SDK's
-own default.
+The write client pins `X-Api-Version: 2026-09-01`, the documented minimum for
+the attachments endpoint. FreeAgent makes that version the default on 1
+December 2026, and stating it rather than inheriting it means that date changes
+nothing here. The endpoint does in fact answer under the SDK's older default as
+well, measured on 2026-09-05, so the pin is a statement of the contract rather
+than the thing holding the feature up. What it genuinely changes is the shape
+of an explanation, which carries a singular `attachment` under the old version
+and an `attachments` array under this one. The read path is unaffected and
+stays on the SDK's own default.
 
 What no precondition can check is the category, and a well-formed explanation
 posted to the wrong one looks like clean data. Every attempt, written or
