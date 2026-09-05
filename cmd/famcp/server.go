@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/alekc/freeagent-sync/internal/api"
+	"github.com/alekc/freeagent-sync/internal/explain"
 	"github.com/alekc/freeagent-sync/internal/family"
 	"github.com/alekc/freeagent-sync/internal/store"
 	"github.com/alekc/freeagent-sync/internal/timeframe"
@@ -28,11 +31,20 @@ const (
 )
 
 // newServer builds the server and registers every tool this build serves.
-func newServer(c *api.Client, account store.Account) *mcp.Server {
+//
+// w is nil unless -allow-writes was given. When it is nil no write tool is
+// registered at all, so the model is not told about a capability it would
+// then be refused; the flag changes the tool list, not just the outcome.
+func newServer(c *api.Client, w *explain.Client, account store.Account) *mcp.Server {
+	access := "Read-only access"
+	if w != nil {
+		access = "Read access, plus explaining unexplained bank transactions " +
+			"and attaching receipts that are not there yet"
+	}
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:        "famcp",
 		Title:       "FreeAgent: " + account.Name,
-		Description: "Read-only access to the FreeAgent ledger for " + account.Slug + ".",
+		Description: access + " to the FreeAgent ledger for " + account.Slug + ".",
 		Version:     Version,
 		WebsiteURL:  "https://github.com/alekc/freeagent-sync",
 	}, nil)
@@ -54,8 +66,27 @@ func newServer(c *api.Client, account store.Account) *mcp.Server {
 			Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true},
 		}, getCompany(c, meta))
 	}
+	if meta, ok := freeagent.Resources[bankTransactionFamily]; ok {
+		mcp.AddTool(s, &mcp.Tool{
+			Name: "list_bank_transactions",
+			Description: "Bank statement lines for one bank account, which the " +
+				"API requires as a parameter: take it from list_bank_accounts. " +
+				"Set view to unexplained to find the lines still needing an " +
+				"explanation, or marked_for_review for ones FreeAgent guessed " +
+				"and a person has not confirmed. Docs: " + meta.Doc,
+			OutputSchema: listOutputSchema,
+			Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true},
+		}, listBankTransactions(c, meta))
+	}
+	if w != nil {
+		registerWriteTools(s, w)
+	}
 	return s
 }
+
+// bankTransactionFamily needs a bank_account parameter, so it gets a tool of
+// its own rather than joining the generic collections.
+const bankTransactionFamily = "bank_transactions"
 
 // companyFamily is the one singleton this build serves. Every other singleton
 // is a report, which needs its own window handling.
@@ -165,28 +196,87 @@ func listCollection(
 		if err != nil {
 			return nil, listOutput{}, err
 		}
+		out, err := walk(ctx, c, meta, opts, in.effectiveLimit())
+		return nil, out, err
+	}
+}
 
-		limit := in.effectiveLimit()
-		out := listOutput{Family: meta.Name}
-		for page, err := range c.Pages(ctx, meta, opts) {
-			if err != nil {
-				return nil, listOutput{}, fmt.Errorf("%s: %w", meta.Name, err)
-			}
-			out.Pages = page.Number
-			for _, record := range page.Records {
-				if len(out.Records) >= limit {
-					out.Truncated = true
-					break
-				}
-				out.Records = append(out.Records, record)
-			}
-			if out.Truncated {
+// listBankTransactions is the one bank-scoped read this build serves, because
+// finding the unexplained lines is the question the write tools exist to
+// answer and it cannot be asked without a bank account.
+func listBankTransactions(
+	c *api.Client, meta freeagent.ResourceMeta,
+) mcp.ToolHandlerFor[bankListInput, listOutput] {
+	return func(
+		ctx context.Context, _ *mcp.CallToolRequest, in bankListInput,
+	) (*mcp.CallToolResult, listOutput, error) {
+		opts, err := in.options(time.Now())
+		if err != nil {
+			return nil, listOutput{}, err
+		}
+		out, err := walk(ctx, c, meta, opts, in.effectiveLimit())
+		return nil, out, err
+	}
+}
+
+// walk pages a family up to limit, reporting where it stopped.
+func walk(
+	ctx context.Context, c *api.Client, meta freeagent.ResourceMeta,
+	opts *freeagent.ListOptions, limit int,
+) (listOutput, error) {
+	out := listOutput{Family: meta.Name}
+	for page, err := range c.Pages(ctx, meta, opts) {
+		if err != nil {
+			return listOutput{}, fmt.Errorf("%s: %w", meta.Name, err)
+		}
+		out.Pages = page.Number
+		for _, record := range page.Records {
+			if len(out.Records) >= limit {
+				out.Truncated = true
 				break
 			}
+			out.Records = append(out.Records, record)
 		}
-		out.Count = len(out.Records)
-		return nil, out, nil
+		if out.Truncated {
+			break
+		}
 	}
+	out.Count = len(out.Records)
+	return out, nil
+}
+
+// bankListInput is listInput plus the bank account the API insists on. The
+// fields are spelled out rather than embedded so the generated schema stays
+// something this file states rather than something struct embedding implies.
+type bankListInput struct {
+	BankAccount string `json:"bank_account" jsonschema:"the bank account URL to read, taken from list_bank_accounts"`
+	View        string `json:"view,omitempty" jsonschema:"unexplained, marked_for_review, explained, manual, imported, or all (the default)"`
+
+	From         string `json:"from,omitempty" jsonschema:"earliest business date to include: 2026-03-01, today, or a relative offset such as 3d, 6mo or 1y"`
+	To           string `json:"to,omitempty" jsonschema:"latest business date to include, same grammar as from"`
+	UpdatedSince string `json:"updated_since,omitempty" jsonschema:"only records changed at or after this instant, same grammar as from"`
+	Sort         string `json:"sort,omitempty" jsonschema:"field to sort by, prefixed with - for descending"`
+	Limit        int    `json:"limit,omitempty" jsonschema:"maximum records to return, default 100, maximum 1000"`
+}
+
+func (in bankListInput) options(now time.Time) (*freeagent.ListOptions, error) {
+	if strings.TrimSpace(in.BankAccount) == "" {
+		return nil, errors.New(
+			"bank_account is required; list_bank_accounts returns the URLs")
+	}
+	opts, err := listInput{
+		From: in.From, To: in.To, UpdatedSince: in.UpdatedSince,
+		View: in.View, Sort: in.Sort,
+	}.options(now)
+	if err != nil {
+		return nil, err
+	}
+	opts.Extra = url.Values{"bank_account": {in.BankAccount}}
+	return opts, nil
+}
+
+func (in bankListInput) effectiveLimit() int {
+	return listInput{Limit: in.Limit}.effectiveLimit()
 }
 
 type companyInput struct{}

@@ -443,6 +443,10 @@ own verbs when they do, never a flag on `pull`.
 - The pull path builds its client with `WithReadOnly()` and there is **no code path that can
   build a writable one**. Structural, not a flag: the constructor for pull mode takes no
   writable parameter. The write path gets its own constructor and its own verbs.
+- One writable constructor exists, in `internal/explain`, reachable only from `famcp
+  -allow-writes`. It is bounded to two operations, each of which re-reads its target and
+  refuses unless the record still has a hole to fill, so it can add a record but never
+  overwrite one, and it appends every attempt to an audit file. See section 17.
 - Production is opt-in, per the SDK's existing convention.
 - Anonymised fixtures only. Real company data never enters the repo, a test, or a commit.
 - Secrets never land in the database. Tokens stay in the SDK's `0600` store.
@@ -465,9 +469,11 @@ The mirror should prove itself, not just report success.
 
 Two accounts, and the split between them is the whole testing strategy.
 
-- **The accountant-managed production company** is the real target. It is read-only, always, and
-  no test points at it. Its only role in development is `facli schema`, which reports field paths
-  and type classifications and never a value, when a shape needs confirming.
+- **The accountant-managed production company** is the real target. No test points at it, and
+  nothing automated writes to it: the only writes it ever receives are the two `internal/explain`
+  operations, driven by a human through `famcp -allow-writes`. Its only role in development is
+  `facli schema`, which reports field paths and type classifications and never a value, when a
+  shape needs confirming.
 - **The sandbox company** from the SDK work is where the live suite runs. Build-tagged
   `integration`, never in PR CI, same discipline as the SDK: the read half refuses production
   unless `FREEAGENT_ALLOW_PRODUCTION=1`, and there is no write half at all until phase 6.
@@ -506,7 +512,11 @@ than one at a time.
 
 ## 17. The write path, reserved
 
-Not being built. What this design keeps possible:
+Replication is not being built. The narrow write path that does exist, `internal/explain`
+behind `famcp -allow-writes`, is not a first slice of this: it posts two kinds of record
+directly and keeps no local state, so none of the machinery below is on its path.
+
+What this design keeps possible:
 
 - `identity_map` exists from the start. Every cross-reference in a FreeAgent payload is a URL on
   the source host, so replicating into a second company means translating every reference, and
@@ -550,14 +560,14 @@ Recorded so the reasoning is not re-litigated later.
 | Money in SQL | exact `TEXT` plus scaled `INTEGER` at scale 6 | SQLite has no decimal type and `REAL` breaks the SDK's hardest rule |
 | Blob storage | content-addressed files, not BLOB columns | dedupe, integrity checking, and a database small enough to copy |
 | Accounts | rows in the database | no config file format to choose, no third surface to keep consistent |
-| Companies | production plus the existing sandbox | production stays read-only forever; the live suite runs against the sandbox |
+| Companies | production plus the existing sandbox | no test ever points at production; the live suite runs against the sandbox |
 | Records tree | one pretty JSON file per record, `<id>.versions/` beside it | stable paths, ordinary diff tools work, greppable |
 | Browsable tree | symlinks, three views, rebuilt idempotently | free to regenerate, no duplicated bytes |
 | History | unbounded, never pruned | knowing what the accountant changed and when is a goal, not a side effect |
 | Export | faithful by default, `--flat` for spreadsheets | the faithful shape round-trips; flattening is lossy and belongs behind a flag |
 | Scheduling | cron or a timer, single shot | no daemon to supervise; budgets and a lock keep runs from colliding |
 | Package surface | everything `internal/`, nothing exported | no second consumer exists; decide when one does |
-| Write path | deferred, columns reserved | cheaper than migrating an archive later |
+| Write path | replication deferred, columns reserved; two guarded operations in `internal/explain` | cheaper than migrating an archive later; the exception is bounded and audited rather than general |
 
 ### Still unknown, to settle during the build
 

@@ -395,6 +395,46 @@ exactly. A value with more precision than that will fail the write rather than
 be rounded quietly. The archive itself keeps the response bytes as they
 arrived, so nothing is rounded there either.
 
+## famcp: the ledger over MCP
+
+`famcp` serves the company to an MCP client over stdio, reading the live API
+through the same read-only client `fasync` uses. It takes no archive lock, so a
+session and a scheduled pull can run together.
+
+```bash
+make famcp
+./bin/famcp -account <slug>
+```
+
+It is **read-only by default**. `-allow-writes` adds exactly two tools, and
+they are bounded so that neither can change anything already recorded:
+
+- `explain_bank_transaction` explains a transaction that still has an
+  unexplained balance, optionally attaching a receipt in the same call. The
+  transaction is re-read from the API immediately before writing, and the call
+  is refused if it has since been explained, if the value runs the opposite way
+  to the unexplained amount, or if it exceeds what is left.
+- `attach_receipt` adds a file to an explanation that has none. One that
+  already carries a file is refused rather than having it replaced.
+
+Both only ever fill a gap. Nothing a person already decided can be overwritten
+or deleted, so the worst case is an unwanted record rather than a lost one.
+
+What no precondition can check is the category, and a well-formed explanation
+posted to the wrong one looks like clean data. Every attempt, written or
+refused, is therefore appended to `writes.jsonl` in the data directory:
+
+```bash
+jq -r 'select(.op=="explain") | [.at, .outcome, .gross_value, .category] | @tsv' \
+  ~/.local/share/freeagent-sync/writes.jsonl
+```
+
+`marked_for_review` transactions, the ones FreeAgent guessed and a person has
+not confirmed, cannot be approved through the API: the field is read-only and
+no endpoint is documented for clearing it. `list_bank_transactions` with
+`view=marked_for_review` finds them, but confirming them stays a job for the
+FreeAgent interface.
+
 ## Roadmap
 
 | Phase | Status |
@@ -405,8 +445,8 @@ arrived, so nothing is rounded there either.
 | 3. Singletons, report snapshots, verify, ad-hoc SQL | done |
 | 4. Payroll by tax year, generated PDFs | done |
 | 5. Export, views, exact numeric projection | done |
-| 6. Write path (import, two-way) | not started, deferred by design |
-| 7. `famcp`, an MCP server over the live API | in progress, collections only |
+| 6. Write path (import, two-way) | not started, deferred by design. `fasync` still cannot write at all; the one exception is `famcp -allow-writes` below, which is narrow and opt-in |
+| 7. `famcp`, an MCP server over the live API | in progress; collections, bank transactions, and an opt-in write path for explanations and receipts |
 
 ## Development
 

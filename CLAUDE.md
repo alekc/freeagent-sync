@@ -22,12 +22,22 @@ every mutating verb inside `Client.newRequest`.
 
 **The guarantee is structural, not procedural.** The constructor used by the
 pull path takes no "writable" parameter, so there is no argument anyone can
-pass to get a writable client. When the write path lands it gets its own
-constructor and its own verbs (`plan`, `apply`), never a flag on `pull`.
+pass to get a writable client. `fasync` has no write verbs at all, and the
+replication write path, when it lands, gets its own constructor and its own
+verbs (`plan`, `apply`), never a flag on `pull`.
 
 Do not add one. Do not add a bypass "just for" some endpoint. Note that
 `account_locks` is a PUT and DELETE endpoint, so this is load-bearing on a
 family the tool already reads.
+
+**One bounded exception exists, and it is in its own package.**
+`internal/explain` builds a writable client and is reachable only from `famcp
+-allow-writes`. It can explain a bank transaction that still has an unexplained
+balance, and attach a file to an explanation that has none. Each re-reads its
+target immediately before writing and refuses anything that would change a
+value already recorded, so it can add a record but never lose one, and every
+attempt is appended to an audit file. That package is the whole write surface:
+if a change would let anything else write, it belongs there or nowhere.
 
 ## Non-negotiables
 
@@ -51,17 +61,22 @@ accountant removed is exactly the thing this archive exists to keep.
 **Timestamps use the fixed-width UTC layout in `store.go`.** RFC3339Nano trims
 trailing zeros, which would break lexicographic ordering of stored text.
 
-**Never commit anything from a real company.** Fixtures are anonymised.
-Production is read-only, always, and no test points at it.
+**Never commit anything from a real company.** Fixtures are anonymised, and no
+test points at production. The only writes production ever receives are the two
+`internal/explain` operations, given `famcp -allow-writes` and a human driving
+the session; nothing automated may write to it.
 
 ## Layout
 
 ```
 cmd/fasync/           the CLI, stdlib flag with per-subcommand flag sets
   session.go          lock, archive, client and engine, assembled once
+cmd/famcp/            the MCP server, reading the live API rather than the archive
+  write.go            the two write tools, registered only with -allow-writes
 internal/store/       schema, migrations, accounts, records, cursors, runs
   migrations/*.sql    stepped by SQLite's own user_version
 internal/api/         read-only client and the generic pager over any family
+internal/explain/     the only writable client; two guarded operations, audited
 internal/engine/      classification, pull, reconcile, probe, blobs, budgets
 internal/blob/        content-addressed file store for attachments
 internal/tree/        the derived JSON record tree and the symlink views

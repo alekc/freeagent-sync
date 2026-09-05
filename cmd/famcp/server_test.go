@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/alekc/freeagent-sync/internal/api"
+	"github.com/alekc/freeagent-sync/internal/explain"
 	"github.com/alekc/freeagent-sync/internal/store"
 )
 
@@ -88,13 +90,21 @@ func invoice(n int) string {
 // client would, without a process boundary.
 func connectServer(t *testing.T, fake *fakeAPI) *mcp.ClientSession {
 	t.Helper()
+	return connectServerWithWrites(t, fake, false)
+}
+
+func connectServerWithWrites(t *testing.T, fake *fakeAPI, writes bool) *mcp.ClientSession {
+	t.Helper()
 
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 
+	env := freeagent.Environment{Name: "test", BaseURL: srv.URL}
+	token := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "t"})
+
 	client, err := api.NewReadOnly(api.Options{
-		Environment:       freeagent.Environment{Name: "test", BaseURL: srv.URL},
-		TokenSource:       oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "t"}),
+		Environment:       env,
+		TokenSource:       token,
 		UserAgent:         "famcp-test",
 		RequestsPerMinute: 100000,
 		RequestsPerHour:   100000,
@@ -103,7 +113,19 @@ func connectServer(t *testing.T, fake *fakeAPI) *mcp.ClientSession {
 		t.Fatal(err)
 	}
 
-	server := newServer(client, store.Account{Slug: "test", Name: "Test Co"})
+	var writer *explain.Client
+	if writes {
+		writer, err = explain.New(explain.Options{
+			Environment: env, TokenSource: token, UserAgent: "famcp-test",
+			Account:   "test",
+			AuditPath: filepath.Join(t.TempDir(), "writes.jsonl"),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	server := newServer(client, writer, store.Account{Slug: "test", Name: "Test Co"})
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
 		t.Fatal(err)
@@ -319,20 +341,144 @@ func TestToolListCoversCollectionsAndExcludesScopedFamilies(t *testing.T) {
 
 	for _, want := range []string{
 		"list_invoices", "list_bills", "list_expenses", "list_contacts", "get_company",
+		// Bank-scoped, but its bank_account parameter is modelled, so it is
+		// served rather than withheld.
+		"list_bank_transactions",
 	} {
 		if !names[want] {
 			t.Errorf("%s is missing from the tool list", want)
 		}
 	}
-	// bank_transactions needs a bank_account, notes needs a contact or project,
-	// and payroll is addressed by year. Offering them without those parameters
-	// would produce a 400 the model cannot act on.
+	// notes needs a contact or project, and payroll is addressed by year.
+	// Offering them without those parameters would produce a 400 the model
+	// cannot act on.
 	for _, unwanted := range []string{
-		"list_bank_transactions", "list_notes", "list_payroll", "list_attachments",
-		"list_trial_balance",
+		"list_notes", "list_payroll", "list_attachments", "list_trial_balance",
 	} {
 		if names[unwanted] {
 			t.Errorf("%s is offered but its required parameters are not modelled yet", unwanted)
+		}
+	}
+}
+
+func toolNames(t *testing.T, s *mcp.ClientSession) map[string]bool {
+	t.Helper()
+	names := map[string]bool{}
+	for tool, err := range s.Tools(t.Context(), nil) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		names[tool.Name] = true
+	}
+	return names
+}
+
+// Without the flag the write tools must not exist at all. Registering them and
+// refusing at call time would tell the model it has a capability it does not,
+// and every refusal would read as a bug rather than as configuration.
+func TestWriteToolsAreAbsentByDefault(t *testing.T) {
+	t.Parallel()
+	names := toolNames(t, connectServer(t, &fakeAPI{plural: "invoices", perPage: 10}))
+
+	for _, unwanted := range []string{"explain_bank_transaction", "attach_receipt"} {
+		if names[unwanted] {
+			t.Errorf("%s is offered on a server started without -allow-writes", unwanted)
+		}
+	}
+	if !names["list_bank_transactions"] {
+		t.Error("list_bank_transactions is a read and must not depend on the write flag")
+	}
+}
+
+// With the flag they appear, and they must be annotated as writes so a client
+// that gates on ReadOnlyHint can ask before calling them.
+func TestWriteToolsAppearWithTheFlagAndAreAnnotated(t *testing.T) {
+	t.Parallel()
+	session := connectServerWithWrites(t, &fakeAPI{plural: "invoices", perPage: 10}, true)
+
+	found := map[string]*mcp.Tool{}
+	for tool, err := range session.Tools(t.Context(), nil) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		found[tool.Name] = tool
+	}
+
+	for _, want := range []string{"explain_bank_transaction", "attach_receipt"} {
+		tool, ok := found[want]
+		if !ok {
+			t.Errorf("%s is missing from a server started with -allow-writes", want)
+			continue
+		}
+		if tool.Annotations == nil || tool.Annotations.ReadOnlyHint {
+			t.Errorf("%s is annotated read-only, but it writes", want)
+		}
+	}
+	// The read tools must not have acquired a write annotation along the way.
+	if tool, ok := found["list_invoices"]; ok {
+		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
+			t.Error("list_invoices lost its read-only annotation")
+		}
+	}
+}
+
+// The API rejects this family without a bank account, so the tool has to say
+// so itself rather than spending a request to be told.
+func TestBankTransactionsRequireAnAccount(t *testing.T) {
+	t.Parallel()
+	fake := &fakeAPI{plural: "bank_transactions", perPage: 10}
+	session := connectServer(t, fake)
+
+	// Two separate layers, and they catch different things: the schema marks
+	// the field required, which stops an omitted one, while the handler's own
+	// check stops a present but empty one. A blank string satisfies the
+	// schema, so without the handler check it would reach FreeAgent as
+	// bank_account= and come back as a 400.
+	for name, args := range map[string]map[string]any{
+		"omitted": {"view": "unexplained"},
+		"blank":   {"bank_account": "  ", "view": "unexplained"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := session.CallTool(t.Context(), &mcp.CallToolParams{
+				Name: "list_bank_transactions", Arguments: args,
+			})
+			if err != nil {
+				t.Fatalf("call failed as a protocol error, want a tool error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatal("a request without a usable bank_account was accepted")
+			}
+		})
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.requests != 0 {
+		t.Errorf("%d requests reached the API, want none", fake.requests)
+	}
+}
+
+// Finding the unexplained lines is the whole point of serving this family, so
+// both the account scope and the view have to reach the query.
+func TestBankTransactionsPassTheAccountAndView(t *testing.T) {
+	t.Parallel()
+	fake := &fakeAPI{plural: "bank_transactions", perPage: 10,
+		records: []string{invoice(1)}}
+	session := connectServer(t, fake)
+
+	callList(t, session, "list_bank_transactions", map[string]any{
+		"bank_account": "https://api.test/v2/bank_accounts/9",
+		"view":         "unexplained",
+	})
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.queries) == 0 {
+		t.Fatal("no request reached the API")
+	}
+	for _, want := range []string{"bank_account=", "view=unexplained"} {
+		if !strings.Contains(fake.queries[0], want) {
+			t.Errorf("query %q is missing %s", fake.queries[0], want)
 		}
 	}
 }
