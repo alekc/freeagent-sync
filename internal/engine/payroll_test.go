@@ -234,7 +234,7 @@ func TestPayrollIsNeverSwept(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, f := range result.Families {
-			if f.Family == "payroll" && f.Swept {
+			if f.Family == "payroll" && f.Sweep == SweepDone {
 				t.Error("a year-scoped family was swept")
 			}
 		}

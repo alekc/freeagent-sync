@@ -266,6 +266,35 @@ projections do, and the write path will need it absolutely.
 `last_seen_at`, and soft-deletes anything not seen. Also the only source of an exact per-family
 count. Weekly by default, or on demand, or via `pull --reconcile-if-due`.
 
+Two conditions have to hold before a sweep is safe, and they are separate questions: the run has
+to want one, and the read has to have covered the family. Collapsing them into one flag is how a
+read that answered a fraction of a family swept the rest of it away. `sweepAsked` decides the
+first from the flags and the cadence; `readCoveredFamily` decides the second from the jobs.
+
+Neither is enough on its own, because a walk that completes still only proves everything was
+*asked for*. So the sweep set is counted before it is applied, and refused when it exceeds
+`--max-sweep-fraction` of the family's live records (10% by default, unbounded below 20 live
+records where a fraction is noise). Upstream deletion is a trickle; a bulk hit is a short read.
+A refusal writes nothing and fails the family, so the run exits 1.
+
+The denominator is what the family held *before* the read: the live count less what this run
+inserted or restored. Measured after, a far end answering four hundred different records instead
+of the forty it had would put its own replacement of the family at 9%, under the bound.
+
+The bound's resolution is the family, because `deleted_at` has no scope. A family that fans out
+over ten bank accounts therefore has ten times the tolerance for one account's read coming back
+empty, which is a limit of the metric rather than of the check. `--max-sweep-fraction` can be
+tightened for such a run; a per-scope bound would need a scope on the record.
+
+`--dry-run` reports that same count and stops there. It does not suppress the read, which has to
+happen for `last_seen_at` to mean anything, and it does not stamp `last_full_reconcile_at`, which
+would silence `--reconcile-if-due` for an interval while having changed nothing. The count comes
+from `store.CountUnseen`, which shares its `WHERE` clause with `SoftDeleteUnseen` as a constant so
+a preview cannot answer a different question than the act.
+
+The report distinguishes a sweep that ran and found nothing from one that never ran: a family that
+was not swept prints `-` rather than `0`, and the summary names how many were.
+
 ### Capability probe
 
 Nothing records which families honour `updated_since`, and a family that ignores it returns
@@ -390,7 +419,9 @@ fasync probe                                   # updated_since capability per fa
 fasync pull [--family ...] [--full] [--reconcile-if-due] [--no-blobs] [--no-files]
             [--from ...] [--to ...] [--changed-since ...] [--changed-until ...]
             [--max-duration ...] [--max-requests ...]
-fasync reconcile [--family ...]                # full-key sweep, marks deletions
+            [--dry-run] [--max-sweep-fraction ...]
+fasync reconcile [--family ...] [--dry-run]    # full-key sweep, marks deletions
+                 [--max-sweep-fraction ...]
 fasync blobs fetch|verify
 fasync files rebuild|relink
 fasync verify                                  # cross-check against FreeAgent's own reports

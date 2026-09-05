@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"strings"
@@ -20,6 +21,9 @@ type pullFlags struct {
 	full         bool
 	reconcile    bool
 	reconcileDue bool
+
+	dryRun           bool
+	maxSweepFraction float64
 
 	from         string
 	to           string
@@ -44,6 +48,10 @@ func (p *pullFlags) register(fs *flag.FlagSet) {
 		"also sweep for records the far end no longer has")
 	fs.BoolVar(&p.reconcileDue, "reconcile-if-due", false,
 		"sweep only families whose last sweep is older than the interval")
+	fs.BoolVar(&p.dryRun, "dry-run", false,
+		"report what each sweep would delete without deleting it (the read still archives)")
+	fs.Float64Var(&p.maxSweepFraction, "max-sweep-fraction", engine.DefaultMaxSweepFraction,
+		"refuse a sweep removing more than this share of a family's live records (1: no bound)")
 
 	fs.StringVar(&p.from, "from", "", "business date lower bound ("+timeframe.Syntax+")")
 	fs.StringVar(&p.to, "to", "", "business date upper bound")
@@ -67,6 +75,21 @@ func (p *pullFlags) register(fs *flag.FlagSet) {
 		"one row per bank account, parent or tax year instead of one per family")
 }
 
+// validate rejects a value the engine would reinterpret rather than obey.
+// Zero is its "use the default" everywhere, so an explicit -max-sweep-fraction
+// 0 would arm the sweep at 10% for a caller who asked for the opposite.
+func (p *pullFlags) validate(fs *flag.FlagSet) error {
+	var err error
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "max-sweep-fraction" && p.maxSweepFraction == 0 {
+			err = errors.New(
+				"fasync: -max-sweep-fraction 0 would refuse every sweep; pass " +
+					"-dry-run to preview one, or a positive share to bound it")
+		}
+	})
+	return err
+}
+
 // options resolves the flags into engine options, deciding the run mode from
 // what the caller actually asked for.
 func (p *pullFlags) options(now time.Time) (engine.Options, error) {
@@ -79,6 +102,15 @@ func (p *pullFlags) options(now time.Time) (engine.Options, error) {
 		return engine.Options{}, err
 	}
 
+	// Rejected here rather than sent on, where a negative share would compare
+	// as a bound nothing can satisfy and refuse every sweep. Zero is left to
+	// the engine's default, as overlap and concurrency already are.
+	if p.maxSweepFraction < 0 {
+		return engine.Options{}, fmt.Errorf(
+			"fasync: -max-sweep-fraction %v is negative; pass 1 to remove the bound",
+			p.maxSweepFraction)
+	}
+
 	opts := engine.Options{
 		Window: store.RunWindow{
 			From:         dates.From,
@@ -86,11 +118,13 @@ func (p *pullFlags) options(now time.Time) (engine.Options, error) {
 			ChangedSince: changes.From,
 			ChangedUntil: changes.To,
 		},
-		Overlap:        p.overlap,
-		Concurrency:    p.concurrency,
-		MaxRequests:    p.maxRequests,
-		Reconcile:      p.reconcile,
-		ReconcileIfDue: p.reconcileDue,
+		Overlap:          p.overlap,
+		Concurrency:      p.concurrency,
+		MaxRequests:      p.maxRequests,
+		Reconcile:        p.reconcile,
+		ReconcileIfDue:   p.reconcileDue,
+		DryRun:           p.dryRun,
+		MaxSweepFraction: p.maxSweepFraction,
 	}
 	if p.families != "" {
 		opts.Families = splitList(p.families)
@@ -121,6 +155,9 @@ func cmdPull(ctx context.Context, e *env, args []string) int {
 	if _, err := e.parse(fs, args); err != nil {
 		return e.fail(err)
 	}
+	if err := flags.validate(fs); err != nil {
+		return e.fail(err)
+	}
 
 	opts, err := flags.options(time.Now())
 	if err != nil {
@@ -135,6 +172,9 @@ func cmdReconcile(ctx context.Context, e *env, args []string) int {
 	var flags pullFlags
 	flags.register(fs)
 	if _, err := e.parse(fs, args); err != nil {
+		return e.fail(err)
+	}
+	if err := flags.validate(fs); err != nil {
 		return e.fail(err)
 	}
 
@@ -223,20 +263,21 @@ func (e *env) printRun(result engine.Result, byScope bool) {
 	if !byScope {
 		rows = mergeByFamily(rows)
 	}
-	for _, f := range rows {
+	gone := goneCells(rows)
+	for i, f := range rows {
 		label := f.Family
 		if byScope {
 			label = f.Name()
 		}
 		t.AppendRow(table.Row{
 			label, f.Pages, f.Stats.Inserted, f.Stats.Updated, f.Stats.Unchanged,
-			f.Stats.Restored, f.Deleted, familyNote(f),
+			f.Stats.Restored, gone[i], familyNote(f),
 		})
 	}
 	t.Render()
 
-	fprintf(e.out, "\n%s: %d records archived, %d gone, %d requests\n",
-		result.Outcome, result.Stats.Total(), result.Deleted, result.Requests)
+	fprintf(e.out, "\n%s: %d records archived, %s, %d requests\n",
+		result.Outcome, result.Stats.Total(), sweepSummary(rows), result.Requests)
 
 	// A family this company does not have is worth knowing about but is not
 	// something to fix, so it is listed apart from the failures.
@@ -282,7 +323,11 @@ func mergeByFamily(results []engine.FamilyResult) []engine.FamilyResult {
 			existing.Pages += f.Pages
 			existing.Stats.Add(f.Stats)
 			existing.Deleted += f.Deleted
-			existing.Swept = existing.Swept || f.Swept
+			// Every job of a family carries the same sweep state, so keeping
+			// the first non-empty one is enough to survive the merge.
+			if existing.Sweep == engine.SweepNone {
+				existing.Sweep = f.Sweep
+			}
 			existing.FullScan = existing.FullScan || f.FullScan
 			existing.CursorAdvance = existing.CursorAdvance || f.CursorAdvance
 			// A family is only unavailable if every one of its jobs was.
@@ -315,6 +360,99 @@ func mergeByFamily(results []engine.FamilyResult) []engine.FamilyResult {
 	return out
 }
 
+// goneCells renders the Gone column for every row of a run. A sweep is
+// family-wide and only the family's first row carries its count, so under
+// --by-scope the rest are blank: a 0 there would say that one bank account was
+// swept and found clean, which nothing checked.
+func goneCells(rows []engine.FamilyResult) []any {
+	out := make([]any, len(rows))
+	seen := map[string]bool{}
+	for i, f := range rows {
+		if seen[f.Family] {
+			out[i] = ""
+			continue
+		}
+		seen[f.Family] = true
+		out[i] = goneCell(f)
+	}
+	return out
+}
+
+// goneCell renders what a family's sweep removed. A family nothing checked
+// shows a dash: printing 0 for both that and a sweep that found nothing is
+// what let a run report reassuringly while having swept nothing at all.
+func goneCell(f engine.FamilyResult) any {
+	switch f.Sweep {
+	case engine.SweepDone, engine.SweepPreview, engine.SweepRefused:
+		return f.Deleted
+	default:
+		return "-"
+	}
+}
+
+// sweepSummary says what the run's sweeps did, naming how many families were
+// actually swept. "0 gone" on its own cannot distinguish a sweep that found
+// nothing from a run that swept nothing.
+func sweepSummary(rows []engine.FamilyResult) string {
+	var swept, previewed, refused, skipped int
+	var gone, would int64
+	// A sweep is per family, but --by-scope hands this one row per bank
+	// account, each carrying the same family-wide state. Counting rows would
+	// report a company's ten accounts as ten families swept.
+	counted := map[string]bool{}
+	for _, f := range rows {
+		first := !counted[f.Family]
+		counted[f.Family] = true
+		switch f.Sweep {
+		case engine.SweepDone:
+			gone += f.Deleted
+			if first {
+				swept++
+			}
+		case engine.SweepPreview:
+			would += f.Deleted
+			if first {
+				previewed++
+			}
+		case engine.SweepRefused:
+			if first {
+				refused++
+			}
+		case engine.SweepSkipped:
+			if first {
+				skipped++
+			}
+		}
+	}
+
+	var parts []string
+	switch {
+	case previewed > 0:
+		parts = append(parts,
+			fmt.Sprintf("%d would go from %s", would, families(previewed)))
+	case swept > 0:
+		parts = append(parts, fmt.Sprintf("%d gone from %s swept", gone, families(swept)))
+	default:
+		parts = append(parts, "no family swept")
+	}
+	if refused > 0 {
+		parts = append(parts, fmt.Sprintf("%d refused", refused))
+	}
+	if skipped > 0 {
+		parts = append(parts, fmt.Sprintf("%d not fully read", skipped))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// families counts families for a summary line, which reads "1 families" often
+// enough for a single-family archive to be worth the four lines.
+func families(n int) string {
+	if n == 1 {
+		return "1 family"
+	}
+	return fmt.Sprintf("%d families", n)
+}
+
 func familyNote(f engine.FamilyResult) string {
 	if f.Unavailable {
 		return "not available"
@@ -326,8 +464,8 @@ func familyNote(f engine.FamilyResult) string {
 	if f.FullScan {
 		notes = append(notes, "full")
 	}
-	if f.Swept {
-		notes = append(notes, "swept")
+	if f.Sweep != engine.SweepNone {
+		notes = append(notes, string(f.Sweep))
 	}
 	if f.CursorAdvance {
 		notes = append(notes, "cursor "+f.Cursor.Format(time.DateOnly))

@@ -89,11 +89,37 @@ and has to be registered on the application before login will work.
 fasync pull                            # changes since the last run
 fasync pull --full                     # ignore the cursor, read everything
 fasync pull --family bills,invoices
-fasync pull --reconcile-if-due         # sweep for deletions when one is due
+fasync pull --full --reconcile-if-due  # sweep for deletions when one is due
 fasync pull --no-blobs --no-files      # archive only, skip downloads and trees
 fasync reconcile                       # read everything and mark what is gone
+fasync reconcile --dry-run             # report what that would remove, remove nothing
 fasync families                        # what is archived and what is not
 ```
+
+### Before a sweep removes anything
+
+A sweep marks whatever the read did not see. That is only correct if the read
+really did cover the family, and an endpoint that quietly narrows its own
+window answers a fraction of one while still reporting a complete walk. Two
+things stand between that and a mass deletion:
+
+`--dry-run` computes each sweep and reports it without deleting. It withholds
+the delete and nothing else: the read still archives, because `last_seen_at` is
+what the sweep set is derived from, and attachments and the browsable trees are
+still brought up to date.
+
+`--max-sweep-fraction` refuses a sweep that would remove more than a share of a
+family's live records, 10% by default. Genuine deletion upstream is a trickle,
+so a bulk hit is nearly always a short read. The share is measured against what
+the family held before the run, so a read answering with a different set rather
+than a shorter one cannot dilute its own deletion. A refused sweep leaves the
+archive untouched, names the family, and makes the run exit 1. Pass `1` to
+allow a sweep of any size, deliberately. Families with fewer than 20 live
+records are swept unbounded, since a fraction of a handful says nothing.
+
+The run table tells the two zeros apart. A family that was swept and found
+nothing gone shows `0`; one that was not checked shows `-`, and the summary
+line says how many families were actually swept.
 
 A pull downloads any new attachments and regenerates the browsable trees when
 it finishes, so one command leaves everything consistent.
@@ -282,8 +308,15 @@ happened:
 | 4 | stopped on `--max-duration` or `--max-requests` with work outstanding |
 
 ```cron
-*/30 * * * * fasync pull --reconcile-if-due --max-duration 20m --progress never
+*/30 * * * * fasync pull --max-duration 20m --progress never
+30 3 * * *   fasync pull --full --reconcile-if-due --progress never
 ```
+
+Only the nightly line can sweep. An incremental pull reads what changed, which
+is never enough to conclude that anything is gone, so `--reconcile-if-due` on
+the half-hourly line would report every family as not fully read and delete
+nothing. The nightly sweep is bounded by default: a read that came back short
+refuses to delete and exits 1 rather than quietly emptying a family.
 
 Progress bars are drawn when stderr is a terminal and structured log lines
 otherwise, so the same command works interactively and under cron.

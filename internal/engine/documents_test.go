@@ -113,7 +113,7 @@ func TestSingletonIsNeverSwept(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, f := range result.Families {
-			if f.Family == "company" && f.Swept {
+			if f.Family == "company" && f.Sweep == SweepDone {
 				t.Error("the company document was swept")
 			}
 		}

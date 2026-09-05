@@ -149,7 +149,7 @@ func TestBankScopedSweepWaitsForEveryAccount(t *testing.T) {
 		t.Errorf("live count = %d after a partial fan-out, want 2 untouched", got)
 	}
 	for _, f := range result.Families {
-		if f.Family == "bank_transactions" && f.Swept {
+		if f.Family == "bank_transactions" && f.Sweep == SweepDone {
 			t.Error("a family was swept while one of its accounts was failing")
 		}
 	}

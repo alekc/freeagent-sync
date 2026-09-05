@@ -257,6 +257,12 @@ func appendVersion(ctx context.Context, tx *sql.Tx, accountID int64, rec Record,
 	return nil
 }
 
+// unseenPredicate selects the live records in a family that a sweep bounded at
+// sweepStart did not see. The sweep and its preview share it so a dry run
+// cannot report a set the sweep would not have removed.
+const unseenPredicate = `account_id = ? AND family = ?
+	   AND deleted_at IS NULL AND last_seen_at < ?`
+
 // SoftDeleteUnseen marks every live record in a family that a full sweep did
 // not see. FreeAgent has no deletions feed, so this is the only way a removal
 // is ever noticed. Rows are kept; only deleted_at is set.
@@ -268,7 +274,7 @@ func (d *DB) SoftDeleteUnseen(
 	}
 	res, err := d.ExecContext(ctx,
 		`UPDATE records SET deleted_at = ?, deleted_by_run = ?
-		 WHERE account_id = ? AND family = ? AND deleted_at IS NULL AND last_seen_at < ?`,
+		 WHERE `+unseenPredicate,
 		FormatTime(time.Now()), nullID(runID), accountID, family, FormatTime(sweepStart))
 	if err != nil {
 		return 0, fmt.Errorf("store: sweeping %s: %w", family, err)
@@ -276,6 +282,25 @@ func (d *DB) SoftDeleteUnseen(
 	n, err := res.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("store: sweeping %s: %w", family, err)
+	}
+	return n, nil
+}
+
+// CountUnseen counts what SoftDeleteUnseen would mark deleted, writing
+// nothing. This is what makes a sweep inspectable before it happens, and what
+// the blast-radius bound is measured against.
+func (d *DB) CountUnseen(
+	ctx context.Context, accountID int64, family string, sweepStart time.Time,
+) (int64, error) {
+	if sweepStart.IsZero() {
+		return 0, errors.New("store: CountUnseen needs the time the sweep began")
+	}
+	var n int64
+	err := d.QueryRowContext(ctx,
+		`SELECT count(*) FROM records WHERE `+unseenPredicate,
+		accountID, family, FormatTime(sweepStart)).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: counting the sweep set for %s: %w", family, err)
 	}
 	return n, nil
 }

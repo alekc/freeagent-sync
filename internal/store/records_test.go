@@ -290,6 +290,68 @@ func TestSoftDeleteUnseenOnlyTouchesStaleRows(t *testing.T) {
 	}
 }
 
+// The preview only means anything if it answers the same question as the act.
+// Counted first, then swept, and the two numbers have to agree.
+func TestCountUnseenMatchesWhatTheSweepRemoves(t *testing.T) {
+	t.Parallel()
+	db := openTemp(t)
+	seedAccount(t, db)
+
+	for _, id := range []string{"1", "2", "3"} {
+		rec, err := NewRecord("bills", []byte(
+			`{"url":"https://api.test/v2/bills/`+id+`","reference":"r"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.UpsertRecords(t.Context(), 1, []Record{rec}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	sweepStart := time.Now()
+	time.Sleep(2 * time.Millisecond)
+
+	// One record is re-seen after the bound, so two are unseen.
+	fresh, err := NewRecord("bills", []byte(
+		`{"url":"https://api.test/v2/bills/3","reference":"r"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UpsertRecords(t.Context(), 1, []Record{fresh}); err != nil {
+		t.Fatal(err)
+	}
+
+	counted, err := db.CountUnseen(t.Context(), 1, "bills", sweepStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counted != 2 {
+		t.Errorf("counted %d unseen, want 2", counted)
+	}
+	if live, _ := db.LiveRecordCount(t.Context(), 1, "bills"); live != 3 {
+		t.Errorf("counting deleted %d records; it must write nothing", 3-live)
+	}
+
+	deleted, err := db.SoftDeleteUnseen(t.Context(), 1, "bills", sweepStart, startTestRun(t, db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != counted {
+		t.Errorf("swept %d but the preview said %d", deleted, counted)
+	}
+}
+
+func TestCountUnseenNeedsASweepStart(t *testing.T) {
+	t.Parallel()
+	db := openTemp(t)
+	seedAccount(t, db)
+
+	if _, err := db.CountUnseen(t.Context(), 1, "bills", time.Time{}); err == nil {
+		t.Fatal("a count with no start time was accepted; it would report everything")
+	}
+}
+
 func TestSoftDeleteUnseenNeedsASweepStart(t *testing.T) {
 	t.Parallel()
 	db := openTemp(t)

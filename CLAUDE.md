@@ -102,6 +102,25 @@ stopped by an error or a budget has no guarantee about which records it saw.
 It must not move the cursor and must not sweep. Re-reading next time is the
 cheap option; a wrong sweep deletes live records.
 
+**A completed walk is not a complete one.** `FullScan` records what was asked
+for, not what came back, so a family whose endpoint narrows its own default
+window is marked fully scanned on a fraction of itself. That is why the sweep
+set is counted and bounded before it is applied, not merely gated on the flag.
+
+**The sweep bound counts what the family held before the read.** Live records
+less what this run inserted or restored. Measured after, a far end answering
+four hundred different records instead of the forty it had dilutes its own
+replacement of the family to 9% and passes a 10% bound.
+
+**`--dry-run` bounds the sweep, not the read.** It still archives, because
+`last_seen_at` is what the sweep set is computed from. It also must not stamp
+`last_full_reconcile_at`, or a preview silences `--reconcile-if-due` for an
+interval while having changed nothing.
+
+**The sweep and its preview share one `WHERE` clause.** `unseenPredicate` in
+the store is that clause. Inlining it in either place lets a preview answer a
+question the sweep would not have asked, which is worse than no preview.
+
 **The cursor comes from the payloads, never from the clock.** `time.Now()`
 would skip anything written while the run was in flight. This is subtle enough
 that a mutation test was used to confirm the suite catches it.
