@@ -688,6 +688,27 @@ func TestExplicitZeroMaxSweepFractionIsRejected(t *testing.T) {
 	}
 }
 
+// NaN parses, is not the zero that means "use the default", and loses every
+// comparison in the guard, so an unrejected one leaves the sweep unbounded
+// while the run still reports a bound. Negative refuses every sweep instead.
+func TestUnusableMaxSweepFractionsAreRejected(t *testing.T) {
+	t.Parallel()
+	for _, arg := range []string{"NaN", "-0.5"} {
+		t.Run(arg, func(t *testing.T) {
+			t.Parallel()
+			var flags pullFlags
+			fs := flag.NewFlagSet("pull", flag.ContinueOnError)
+			flags.register(fs)
+			if err := fs.Parse([]string{"--max-sweep-fraction", arg}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := flags.options(pullNow); err == nil {
+				t.Errorf("-max-sweep-fraction %s was accepted as a bound", arg)
+			}
+		})
+	}
+}
+
 // --by-scope is how the per-account detail is still reachable.
 func TestByScopeKeepsEveryRow(t *testing.T) {
 	t.Parallel()

@@ -275,7 +275,8 @@ Neither is enough on its own, because a walk that completes still only proves ev
 *asked for*. So the sweep set is counted before it is applied, and refused when it exceeds
 `--max-sweep-fraction` of the family's live records (10% by default, unbounded below 20 live
 records where a fraction is noise). Upstream deletion is a trickle; a bulk hit is a short read.
-A refusal writes nothing and fails the family, so the run exits 1.
+A refusal withholds the delete and not the read, exactly as a preview does, and fails the
+family, so the run exits 1.
 
 The denominator is what the family held *before* the read: the live count less what this run
 inserted or restored. Measured after, a far end answering four hundred different records instead

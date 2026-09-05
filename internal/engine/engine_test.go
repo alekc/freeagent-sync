@@ -336,8 +336,10 @@ func TestReconcileIfDueSkipsARecentSweep(t *testing.T) {
 	second := h.pull(Options{
 		Mode: store.ModeFull, ReconcileIfDue: true, ReconcileInterval: time.Hour,
 	})
-	if h.familyResult(second, "bills").Sweep == SweepDone {
-		t.Error("a sweep ran again inside its interval")
+	// Not merely "did not sweep": inside the interval no sweep is evaluated at
+	// all, so refused, skipped or dry-run would each be a regression too.
+	if got := h.familyResult(second, "bills").Sweep; got != SweepNone {
+		t.Errorf("sweep = %q, want none evaluated inside its interval", got)
 	}
 }
 

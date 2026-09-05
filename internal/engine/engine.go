@@ -128,7 +128,7 @@ const (
 	SweepSkipped SweepState = "skipped"
 	// SweepRefused: the sweep set exceeded MaxSweepFraction of live records.
 	SweepRefused SweepState = "refused"
-	// SweepPreview: computed under DryRun, nothing written.
+	// SweepPreview: computed under DryRun, with the delete withheld.
 	SweepPreview SweepState = "dry-run"
 	// SweepDone: the sweep ran and its count is real.
 	SweepDone SweepState = "swept"

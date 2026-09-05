@@ -112,10 +112,11 @@ still brought up to date.
 family's live records, 10% by default. Genuine deletion upstream is a trickle,
 so a bulk hit is nearly always a short read. The share is measured against what
 the family held before the run, so a read answering with a different set rather
-than a shorter one cannot dilute its own deletion. A refused sweep leaves the
-archive untouched, names the family, and makes the run exit 1. Pass `1` to
-allow a sweep of any size, deliberately. Families with fewer than 20 live
-records are swept unbounded, since a fraction of a handful says nothing.
+than a shorter one cannot dilute its own deletion. A refused sweep deletes no
+records, names the family, and makes the run exit 1; the read that preceded it
+still archived, exactly as under `--dry-run`. Pass `1` to allow a sweep of any
+size, deliberately. Families with fewer than 20 live records are swept
+unbounded, since a fraction of a handful says nothing.
 
 The run table tells the two zeros apart. A family that was swept and found
 nothing gone shows `0`; one that was not checked shows `-`, and the summary

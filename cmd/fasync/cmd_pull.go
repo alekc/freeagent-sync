@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -102,12 +103,14 @@ func (p *pullFlags) options(now time.Time) (engine.Options, error) {
 		return engine.Options{}, err
 	}
 
-	// Rejected here rather than sent on, where a negative share would compare
-	// as a bound nothing can satisfy and refuse every sweep. Zero is left to
-	// the engine's default, as overlap and concurrency already are.
-	if p.maxSweepFraction < 0 {
+	// Rejected here rather than sent on, where a negative share would refuse
+	// every sweep and a NaN would lose every comparison in the guard, leaving
+	// the sweep unbounded while looking bounded. Zero is left to the engine's
+	// default, as overlap and concurrency already are.
+	if p.maxSweepFraction < 0 || math.IsNaN(p.maxSweepFraction) {
 		return engine.Options{}, fmt.Errorf(
-			"fasync: -max-sweep-fraction %v is negative; pass 1 to remove the bound",
+			"fasync: -max-sweep-fraction %v is not a share; pass a positive "+
+				"fraction, or 1 to remove the bound",
 			p.maxSweepFraction)
 	}
 
