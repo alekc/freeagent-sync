@@ -406,12 +406,14 @@ arrived, so nothing is rounded there either.
 | 4. Payroll by tax year, generated PDFs | done |
 | 5. Export, views, exact numeric projection | done |
 | 6. Write path (import, two-way) | not started, deferred by design |
+| 7. `famcp`, an MCP server over the live API | in progress, collections only |
 
 ## Development
 
 ```bash
 make lint test
 make fasync           # ./bin/fasync
+make famcp            # ./bin/famcp
 make cover
 ```
 
