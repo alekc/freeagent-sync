@@ -429,6 +429,47 @@ func TestNestedAttachmentsAreFound(t *testing.T) {
 	}
 }
 
+// From API version 2026-09-01 an explanation carries an attachments array in
+// place of the singular object above, and FreeAgent makes that the default on
+// 1 December 2026. Extraction recognises a shape rather than a key name, so
+// the change should pass through unnoticed. This pins that, because the cost
+// of being wrong is a pull that silently stops finding receipts.
+func TestAttachmentsArrayIsFound(t *testing.T) {
+	t.Parallel()
+	body := `{
+		"url":"https://api.test/v2/bank_transactions/9",
+		"bank_transaction_explanations":[
+			{"url":"https://api.test/v2/bank_transaction_explanations/5",
+			 "attachments":[
+				{"url":"https://api.test/v2/attachments/7",
+				 "content_src":"https://cdn.test/first.pdf",
+				 "file_name":"first.pdf"},
+				{"url":"https://api.test/v2/attachments/8",
+				 "content_src":"https://cdn.test/second.pdf",
+				 "file_name":"second.pdf"}
+			 ]}
+		]
+	}`
+
+	found, err := extractAttachments("bank_transactions", []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 2 {
+		t.Fatalf("found %d attachments, want both entries of the array", len(found))
+	}
+	names := map[string]bool{}
+	for _, att := range found {
+		names[att.FileName] = true
+		if att.ParentURL != "https://api.test/v2/bank_transactions/9" {
+			t.Errorf("parent = %q, want the transaction", att.ParentURL)
+		}
+	}
+	if !names["first.pdf"] || !names["second.pdf"] {
+		t.Errorf("file names = %v, want both", names)
+	}
+}
+
 // An object without a content_src is not an attachment, however many other
 // url fields a payload carries.
 func TestExtractIgnoresOrdinaryReferences(t *testing.T) {

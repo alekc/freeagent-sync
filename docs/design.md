@@ -80,10 +80,15 @@ explanations. Sales invoices, estimates and credit notes have no attachment fiel
 document is generated rather than uploaded. So there are two blob sources with different costs:
 
 This describes the shape at the API version the SDK pins, currently `2026-08-16`. From
-`2026-09-01` a bank transaction explanation carries an `attachments` array instead, and
-FreeAgent makes that the default on 1 December 2026. The pull path is insulated only for as
-long as the pin holds, so re-read this section when the SDK's `DefaultAPIVersion` moves.
-`internal/explain` already runs at the newer version; see section 13.
+`2026-09-01` a bank transaction explanation carries an `attachments` array instead, verified
+against production on 2026-09-05, and FreeAgent makes that the default on 1 December 2026.
+
+The pull path does not care. `extractAttachments` walks the whole body and recognises any
+object carrying both `url` and `content_src`, rather than reading a key by name, so the
+singular object and the array both extract identically and an explanation with several files
+yields several. `TestAttachmentsArrayIsFound` pins that. What still reads the singular field
+is the `BankTransactionExplanation.Attachment` struct member in the SDK, which is why nothing
+in `internal/explain` consults it; see section 13.
 
 - `attachment.content_src` (plus `_medium`, `_small`): a time-limited URL on a third-party host.
   No auth needed, and fetching it does not spend the API rate budget. `expires_at` is on the
