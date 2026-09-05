@@ -441,11 +441,23 @@ jq -r 'select(.op=="explain") | [.at, .outcome, .gross_value, .category] | @tsv'
   ~/.local/share/freeagent-sync/writes.jsonl
 ```
 
-`marked_for_review` transactions, the ones FreeAgent guessed and a person has
-not confirmed, cannot be approved through the API: the field is read-only and
-no endpoint is documented for clearing it. `list_bank_transactions` with
-`view=marked_for_review` finds them, but confirming them stays a job for the
-FreeAgent interface.
+`marked_for_review` transactions are the ones FreeAgent guessed and a person
+has not confirmed. `list_bank_transactions` with `view=marked_for_review` finds
+them, and confirming them stays a job for the FreeAgent interface, but not for
+the reason previously given here.
+
+FreeAgent documents the field as read-only and the SDK's struct says the same.
+Probed against the sandbox on 2026-09-05, it is neither: a create that sends
+`marked_for_review: true` gets it back as true where an ordinary create reports
+false, a `PUT` sending false clears it, and the account's
+`marked_for_review_count` follows both ways. What does not clear it is an
+unrelated edit, so a description-only update leaves the flag standing.
+
+This tool still will not clear it, and that is now a choice rather than a
+limit. Confirming somebody's guessed explanation is a judgement about their
+books, the behaviour is undocumented and so may be withdrawn, and
+`internal/explain` issues no `PUT` at all, which is what keeps its worst case
+an unwanted record rather than a changed one.
 
 ## Roadmap
 
