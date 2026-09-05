@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,25 +19,44 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// fakeAPI answers the four calls this package makes and records what it was
-// asked, so a test can assert on the order of a read and a write rather than
-// only on the outcome.
+// fakeAPI answers the calls this package makes and records what it was asked,
+// so a test can assert on the order of a read and a write rather than only on
+// the outcome.
 type fakeAPI struct {
 	mu sync.Mutex
 
-	unexplained string // the transaction's unexplained_amount, "" for absent
-	attached    bool   // whether the explanation already carries a file
+	unexplained string   // the transaction's unexplained_amount, "" for absent
+	files       []string // file names already on the explanation
+	dropUpload  bool     // accept a POST but store nothing, as a stale version would
 
-	calls     []string
-	writeBody map[string]any
+	calls      []string
+	versions   []string
+	writeBody  map[string]any
+	uploadBody map[string]any
 }
 
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
+	f.versions = append(f.versions, r.Header.Get("X-Api-Version"))
 
 	switch {
+	case strings.HasSuffix(r.URL.Path, "/attachments"):
+		if r.Method == http.MethodPost {
+			var body attachmentList
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &body)
+			_ = json.Unmarshal(raw, &f.uploadBody)
+			if !f.dropUpload {
+				for _, a := range body.Attachments {
+					f.files = append(f.files, a.FileName)
+				}
+			}
+			w.WriteHeader(http.StatusCreated)
+		}
+		f.writeAttachments(w)
+
 	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "bank_transactions/"):
 		amount := ""
 		if f.unexplained != "" {
@@ -47,12 +67,11 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"http://"+r.Host+r.URL.Path, "http://"+r.Host, amount)
 
 	case r.Method == http.MethodGet:
-		attachment := ""
-		if f.attached {
-			attachment = `,"attachment":{"url":"http://x/v2/attachments/5","file_name":"old.pdf"}`
-		}
-		fmt.Fprintf(w, `{"bank_transaction_explanation":{"url":%q%s}}`,
-			"http://"+r.Host+r.URL.Path, attachment)
+		// Version 2026-09-01 no longer returns a singular attachment, so the
+		// fake does not either. A guard reading it would find nil here just
+		// as it would in production.
+		fmt.Fprintf(w, `{"bank_transaction_explanation":{"url":%q}}`,
+			"http://"+r.Host+r.URL.Path)
 
 	default:
 		var body map[string]any
@@ -65,6 +84,17 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"bank_transaction_explanation":{"url":"%s/v2/bank_transaction_explanations/77"}}`,
 			"http://"+r.Host)
 	}
+}
+
+func (f *fakeAPI) writeAttachments(w http.ResponseWriter) {
+	list := attachmentList{}
+	for i, name := range f.files {
+		list.Attachments = append(list.Attachments, freeagent.Attachment{
+			URL:      freeagent.ResourceURL(fmt.Sprintf("http://x/v2/attachments/%d", i+1)),
+			FileName: name,
+		})
+	}
+	_ = json.NewEncoder(w).Encode(list)
 }
 
 func (f *fakeAPI) saw(method string) bool {
@@ -227,6 +257,67 @@ func TestExplainReadsTheTransactionBeforeWriting(t *testing.T) {
 	}
 }
 
+// The explanation must be created without an inline attachment. Under version
+// 2026-09-01 attachments are managed only through the sub-resource, and a
+// server that ignores an inline one rather than rejecting it would leave this
+// tool reporting a receipt it never filed.
+func TestExplainSendsTheReceiptSeparately(t *testing.T) {
+	t.Parallel()
+	fake := &fakeAPI{unexplained: "-100.0"}
+	c, audit, base := newClient(t, fake)
+
+	in := req(base, "-100.0")
+	in.Receipt = &Receipt{
+		FileName: "r.pdf", ContentType: "application/pdf", Data: []byte("%PDF"),
+	}
+	res, err := c.Explain(t.Context(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Attachments != 1 || res.AttachedName != "r.pdf" {
+		t.Errorf("result does not report the attachment: %+v", res)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if _, inline := fake.writeBody["attachment"]; inline {
+		t.Errorf("the explanation was created with an inline attachment: %v", fake.writeBody)
+	}
+	if !strings.HasSuffix(fake.calls[len(fake.calls)-1], "/attachments") {
+		t.Errorf("the receipt did not go to the sub-resource: %v", fake.calls)
+	}
+	// Two writes, so two audit lines. One line covering both would hide which
+	// half happened when only one of them did.
+	if lines := auditLines(t, audit); len(lines) != 2 {
+		t.Errorf("want an explain line and an attach line, got %v", lines)
+	}
+}
+
+// The two calls can part-succeed. The explanation exists either way, so its
+// URL has to survive the error or the caller cannot finish the job.
+func TestExplainNamesTheExplanationWhenTheReceiptFails(t *testing.T) {
+	t.Parallel()
+	fake := &fakeAPI{unexplained: "-100.0", dropUpload: true}
+	c, audit, base := newClient(t, fake)
+
+	in := req(base, "-100.0")
+	in.Receipt = &Receipt{
+		FileName: "r.pdf", ContentType: "application/pdf", Data: []byte("%PDF"),
+	}
+	_, err := c.Explain(t.Context(), in)
+	if err == nil {
+		t.Fatal("a failed attachment was reported as full success")
+	}
+	if !strings.Contains(err.Error(), "/bank_transaction_explanations/77") {
+		t.Errorf("the error does not name the explanation that was created: %v", err)
+	}
+
+	lines := auditLines(t, audit)
+	if len(lines) != 2 || lines[0]["outcome"] != "written" || lines[1]["outcome"] != "refused" {
+		t.Errorf("the audit does not show one half succeeding: %v", lines)
+	}
+}
+
 // A transaction with no unexplained_amount at all is not evidence that it is
 // unexplained, so it must be treated as settled rather than as unknown.
 func TestExplainRefusesWhenTheFieldIsAbsent(t *testing.T) {
@@ -240,50 +331,132 @@ func TestExplainRefusesWhenTheFieldIsAbsent(t *testing.T) {
 	}
 }
 
-// Replacing a receipt somebody already filed would destroy the one piece of
-// evidence the record carries.
-func TestAttachRefusesWhenAFileIsAlreadyThere(t *testing.T) {
+func attach(base, name string) AttachRequest {
+	return AttachRequest{
+		Explanation: freeagent.ResourceURL(base + "/v2/bank_transaction_explanations/77"),
+		Receipt: Receipt{
+			FileName: name, ContentType: "application/pdf", Data: []byte("%PDF"),
+		},
+	}
+}
+
+// Filing the same receipt twice is what a retried call does, and appending
+// makes it silently succeed unless something refuses it.
+func TestAttachRefusesAFileOfTheSameName(t *testing.T) {
 	t.Parallel()
-	fake := &fakeAPI{attached: true}
+	fake := &fakeAPI{files: []string{"r.pdf"}}
 	c, audit, base := newClient(t, fake)
 
-	_, err := c.AttachReceipt(t.Context(), AttachRequest{
-		Explanation: freeagent.ResourceURL(base + "/v2/bank_transaction_explanations/77"),
-		Receipt:     Receipt{FileName: "r.pdf", ContentType: "application/pdf", Data: []byte("%PDF")},
-	})
+	_, err := c.AttachReceipt(t.Context(), attach(base, "r.pdf"))
 	if !errors.Is(err, ErrAlreadyAttached) {
 		t.Fatalf("err = %v, want ErrAlreadyAttached", err)
 	}
-	if fake.saw(http.MethodPut) {
-		t.Error("an update reached the API for an explanation that already had a file")
+	if fake.saw(http.MethodPost) {
+		t.Error("an upload reached the API for a name that was already there")
 	}
 	if lines := auditLines(t, audit); len(lines) != 1 || lines[0]["outcome"] != "refused" {
 		t.Errorf("the refusal was not audited: %v", lines)
 	}
 }
 
-// The update must carry the attachment and nothing else. Any other field in
-// the body is a field this tool could overwrite by accident.
-func TestAttachSendsOnlyTheAttachment(t *testing.T) {
+// A second, differently named receipt is a legitimate addition now that an
+// explanation holds up to fifty. The old single-slot guard would refuse it.
+func TestAttachAddsToWhatIsAlreadyThere(t *testing.T) {
+	t.Parallel()
+	fake := &fakeAPI{files: []string{"first.pdf"}}
+	c, _, base := newClient(t, fake)
+
+	res, err := c.AttachReceipt(t.Context(), attach(base, "second.pdf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Attachments != 2 {
+		t.Errorf("attachments = %d, want 2", res.Attachments)
+	}
+}
+
+// The write must be a POST. PUT on the same endpoint is what replaces a file's
+// contents and, with _destroy, removes one, so reaching it at all would put
+// the destructive verbs back within range.
+func TestAttachOnlyEverPosts(t *testing.T) {
 	t.Parallel()
 	fake := &fakeAPI{}
 	c, _, base := newClient(t, fake)
 
-	_, err := c.AttachReceipt(t.Context(), AttachRequest{
-		Explanation: freeagent.ResourceURL(base + "/v2/bank_transaction_explanations/77"),
-		Receipt:     Receipt{FileName: "r.pdf", ContentType: "application/pdf", Data: []byte("%PDF")},
-	})
-	if err != nil {
+	if _, err := c.AttachReceipt(t.Context(), attach(base, "r.pdf")); err != nil {
+		t.Fatal(err)
+	}
+	if fake.saw(http.MethodPut) || fake.saw(http.MethodDelete) {
+		t.Errorf("a destructive verb was used: %v", fake.calls)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	files, ok := fake.uploadBody["attachments"].([]any)
+	if !ok || len(files) != 1 {
+		t.Fatalf("the upload body is not a one-element attachments array: %v", fake.uploadBody)
+	}
+	if _, replacing := files[0].(map[string]any)["url"]; replacing {
+		t.Error("the upload named an existing attachment, which would replace it")
+	}
+}
+
+// The explanation is at the documented limit, so appending is refused rather
+// than discovered as a 422 after uploading the file.
+func TestAttachRefusesAFullExplanation(t *testing.T) {
+	t.Parallel()
+	full := make([]string, maxAttachments)
+	for i := range full {
+		full[i] = fmt.Sprintf("receipt-%d.pdf", i)
+	}
+	fake := &fakeAPI{files: full}
+	c, _, base := newClient(t, fake)
+
+	_, err := c.AttachReceipt(t.Context(), attach(base, "one-too-many.pdf"))
+	if !errors.Is(err, ErrTooManyAttachments) {
+		t.Fatalf("err = %v, want ErrTooManyAttachments", err)
+	}
+	if fake.saw(http.MethodPost) {
+		t.Error("an upload reached a full explanation")
+	}
+}
+
+// A server on the wrong version answers a POST cheerfully and stores nothing.
+// Trusting the status code would report a receipt that was never filed.
+func TestAttachVerifiesTheFileLanded(t *testing.T) {
+	t.Parallel()
+	fake := &fakeAPI{dropUpload: true}
+	c, _, base := newClient(t, fake)
+
+	_, err := c.AttachReceipt(t.Context(), attach(base, "r.pdf"))
+	if err == nil {
+		t.Fatal("a silently discarded upload was reported as success")
+	}
+	if !strings.Contains(err.Error(), "r.pdf") {
+		t.Errorf("the error does not name the missing file: %v", err)
+	}
+}
+
+// The version header is what makes the sub-resource reachable at all, so it
+// has to be on every request rather than assumed from the SDK default.
+func TestEveryRequestStatesTheAPIVersion(t *testing.T) {
+	t.Parallel()
+	fake := &fakeAPI{}
+	c, _, base := newClient(t, fake)
+
+	if _, err := c.AttachReceipt(t.Context(), attach(base, "r.pdf")); err != nil {
 		t.Fatal(err)
 	}
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if len(fake.writeBody) != 1 {
-		t.Fatalf("the update body carried %v, want the attachment alone", fake.writeBody)
+	if len(fake.versions) == 0 {
+		t.Fatal("no requests were made")
 	}
-	if _, ok := fake.writeBody["attachment"]; !ok {
-		t.Errorf("the update body has no attachment: %v", fake.writeBody)
+	for i, v := range fake.versions {
+		if v != apiVersion {
+			t.Errorf("%s sent X-Api-Version %q, want %q", fake.calls[i], v, apiVersion)
+		}
 	}
 }
 

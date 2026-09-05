@@ -7,11 +7,13 @@
 // By default nothing here can write to the company. The -allow-writes flag
 // adds a second client, from internal/explain, which can do exactly two
 // things: explain a bank transaction that still has an unexplained balance,
-// and attach a file to an explanation that has none. Both re-read their target
-// before writing and refuse anything that would change a value already
-// recorded, and every attempt is appended to an audit file. Without the flag
-// neither tool is registered, so the model is not offered a capability that
-// would then be refused.
+// and add a file to an explanation. Neither can change a value already
+// recorded, explaining because it re-reads the transaction first and refuses
+// unless a balance is still open, attaching because it appends to a
+// sub-resource whose replace and delete operations no code here reaches. Every
+// attempt is appended to an audit file. Without the flag neither tool is
+// registered, so the model is not offered a capability that would then be
+// refused.
 package main
 
 import (

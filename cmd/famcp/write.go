@@ -21,8 +21,9 @@ import (
 //
 // Both are annotated as not read-only and not destructive, which is the
 // accurate pair: they create records, and neither can overwrite or remove
-// anything, because internal/explain refuses unless the target still has a
-// hole to fill.
+// anything. Explaining is refused unless the transaction still has an
+// unexplained balance, and attaching appends to a sub-resource that has no
+// replace or delete within reach of this code.
 func registerWriteTools(s *mcp.Server, w *explain.Client) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "explain_bank_transaction",
@@ -42,10 +43,11 @@ func registerWriteTools(s *mcp.Server, w *explain.Client) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "attach_receipt",
-		Description: "Attach a file to an existing bank transaction explanation " +
-			"that has no attachment yet. An explanation that already carries a " +
-			"file is refused rather than having it replaced, so a receipt " +
-			"somebody already filed is never lost.",
+		Description: "Attach a file to an existing bank transaction explanation. " +
+			"An explanation holds up to 50 files and this adds to them, so a " +
+			"receipt somebody already filed is never replaced or removed. A " +
+			"file whose name is already on the explanation is refused, so " +
+			"repeating the call does not file the same receipt twice.",
 		OutputSchema: writeOutputSchema,
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    false,
@@ -59,7 +61,7 @@ func registerWriteTools(s *mcp.Server, w *explain.Client) {
 // attachment: on the parent record, base64 encoded, not as a separate upload.
 type receiptInput struct {
 	FileName    string `json:"file_name" jsonschema:"the file name to store, for example receipt-2026-04-01.pdf"`
-	ContentType string `json:"content_type" jsonschema:"image/png, image/jpeg, image/gif or application/pdf; FreeAgent accepts nothing else"`
+	ContentType string `json:"content_type" jsonschema:"image/png, image/jpeg, image/gif or application/pdf; FreeAgent accepts nothing else, and rejects it before the upload is read"`
 	DataBase64  string `json:"data_base64" jsonschema:"the file content, base64 encoded, at most 5 MB decoded"`
 	Description string `json:"description,omitempty" jsonschema:"an optional note stored with the file"`
 }
@@ -106,6 +108,7 @@ type writeOutput struct {
 	UnexplainedAfter  string `json:"unexplained_after,omitempty"`
 	AttachedFile      string `json:"attached_file,omitempty"`
 	AttachedBytes     int    `json:"attached_bytes,omitempty"`
+	Attachments       int    `json:"attachments,omitempty"`
 	Audited           string `json:"audited_at,omitempty"`
 }
 
@@ -121,7 +124,9 @@ var writeOutputSchema = &jsonschema.Schema{
 			"unexplained afterwards; not zero when only part was explained"},
 		"attached_file":  {Type: "string", Description: "the file name attached, if any"},
 		"attached_bytes": {Type: "integer", Description: "its decoded size"},
-		"audited_at":     {Type: "string", Description: "when the audit line was written"},
+		"attachments": {Type: "integer", Description: "how many files the " +
+			"explanation carries afterwards, as the API reported them"},
+		"audited_at": {Type: "string", Description: "when the audit line was written"},
 	},
 }
 
@@ -192,6 +197,7 @@ func asWriteOutput(res *explain.Result) writeOutput {
 		UnexplainedAfter:  res.RemainingAfter,
 		AttachedFile:      res.AttachedName,
 		AttachedBytes:     res.AttachedBytes,
+		Attachments:       res.Attachments,
 	}
 	if !res.AuditedAt.IsZero() {
 		out.Audited = res.AuditedAt.Format(time.RFC3339)

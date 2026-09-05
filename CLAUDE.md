@@ -33,11 +33,21 @@ family the tool already reads.
 **One bounded exception exists, and it is in its own package.**
 `internal/explain` builds a writable client and is reachable only from `famcp
 -allow-writes`. It can explain a bank transaction that still has an unexplained
-balance, and attach a file to an explanation that has none. Each re-reads its
-target immediately before writing and refuses anything that would change a
-value already recorded, so it can add a record but never lose one, and every
-attempt is appended to an audit file. That package is the whole write surface:
-if a change would let anything else write, it belongs there or nowhere.
+balance, and add a file to an explanation. It can add a record but never lose
+one, and every attempt is appended to an audit file. That package is the whole
+write surface: if a change would let anything else write, it belongs there or
+nowhere.
+
+**It pins `X-Api-Version` to `2026-09-01`, and that pin is load-bearing.** It
+buys the attachments sub-resource, where `POST` appends and cannot replace. The
+cost is that from that version an explanation no longer carries a singular
+`attachment` attribute, so anything reading
+`BankTransactionExplanation.Attachment` gets nil forever rather than an error.
+Do not write a guard against that field here: it would fail open while reading
+like protection. The attachment precondition is
+`GET .../bank_transaction_explanations/:id/attachments`, and nothing in the
+package touches the `PUT` on that endpoint, which is where replacing a file and
+deleting one (a `_destroy` flag, not a `DELETE` verb) both live.
 
 ## Non-negotiables
 

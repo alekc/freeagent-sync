@@ -6,11 +6,11 @@
 // a glance which one they are looking at.
 //
 // The write surface is bounded twice over. This client reaches exactly two
-// operations, and each refuses unless a precondition read against the live API
-// says the record still has a hole to fill: a transaction with an unexplained
-// balance, or an explanation carrying no attachment. Neither can overwrite a
-// value a human already set, so the worst case is an unwanted record rather
-// than a lost one.
+// operations, and neither can overwrite or remove anything, so the worst case
+// is an unwanted record rather than a lost one. Creating an explanation is
+// refused unless a precondition read against the live API says the transaction
+// still has an unexplained balance. Attaching a file needs no such guard: it
+// goes to the attachments sub-resource, whose POST only ever appends.
 //
 // What no precondition can catch is a well-formed explanation posted to the
 // wrong category. That is why every attempt, successful or not, is appended to
@@ -22,7 +22,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,10 +33,28 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// requestTimeout bounds one call. A receipt upload carries up to
-// MaxAttachmentBytes over the same connection, so this is more generous than
-// a plain read would need.
-const requestTimeout = 2 * time.Minute
+// apiVersion pins X-Api-Version for this client alone, which is what makes the
+// attachments sub-resource reachable: FreeAgent gates it behind 2026-09-01 and
+// the SDK otherwise sends its own older default.
+//
+// The pin is deliberately not shared with the read client. From this version
+// an explanation no longer carries a singular attachment attribute, so a guard
+// reading that field would find nil every time and pass every call. Nothing
+// here reads it; the attachments sub-resource is the only source consulted.
+//
+// From 1 December 2026 this becomes the API's default rather than an opt-in.
+// That changes nothing here, because the version is stated rather than
+// inherited.
+const apiVersion = "2026-09-01"
+
+// What FreeAgent will hold, documented on the attachments endpoint. The
+// per-call limit is not a constraint this package can reach, since it sends
+// one file at a time, but the total is worth refusing locally rather than
+// discovering as a 422 after uploading several megabytes.
+const (
+	maxAttachments = 50
+	requestTimeout = 2 * time.Minute
+)
 
 // Guard failures. They are values rather than formatted strings because a
 // caller has to be able to tell "the guard stopped me" from "the API is
@@ -51,19 +71,30 @@ var (
 	// reverse, which would be an explanation of the wrong direction.
 	ErrSignMismatch = errors.New(
 		"the value runs in the opposite direction to the unexplained amount")
-	// ErrAlreadyAttached means the explanation carries a file already.
+	// ErrAlreadyAttached means a file of that name is on the explanation
+	// already. Attaching is additive, so this is not protecting a stored file
+	// from being replaced; it is refusing to file the same receipt twice,
+	// which is what a retried call would otherwise do.
 	ErrAlreadyAttached = errors.New(
-		"the explanation already carries an attachment, which is never replaced")
+		"the explanation already carries a file of that name")
+	// ErrTooManyAttachments means the explanation is at the documented limit.
+	ErrTooManyAttachments = errors.New(
+		"the explanation already holds the maximum number of attachments")
 )
 
 // contentTypes FreeAgent accepts for an attachment. Checked here so an
 // oversized or unsupported upload fails locally instead of after transferring
 // several megabytes and coming back as a 422.
+// application/x-pdf is here because the bank transaction explanations page
+// lists it where the bills and expenses pages say application/pdf. Both come
+// from FreeAgent's own documentation for the family this package writes to,
+// so both are accepted rather than guessing which page is stale.
 var contentTypes = map[string]bool{
-	"image/png":       true,
-	"image/jpeg":      true,
-	"image/gif":       true,
-	"application/pdf": true,
+	"image/png":         true,
+	"image/jpeg":        true,
+	"image/gif":         true,
+	"application/pdf":   true,
+	"application/x-pdf": true,
 }
 
 // Options configures the writable client.
@@ -111,6 +142,7 @@ func New(opts Options) (*Client, error) {
 		freeagent.WithBaseURL(opts.Environment.BaseURL),
 		freeagent.WithTokenSource(opts.TokenSource),
 		freeagent.WithUserAgent(opts.UserAgent),
+		freeagent.WithAPIVersion(apiVersion),
 	}
 	if opts.RequestsPerMinute > 0 || opts.RequestsPerHour > 0 {
 		settings = append(settings,
@@ -154,16 +186,116 @@ func (r *Receipt) validate() error {
 	return nil
 }
 
-func (r *Receipt) attachment() *freeagent.Attachment {
-	if r == nil {
-		return nil
-	}
-	return &freeagent.Attachment{
+func (r Receipt) attachment() freeagent.Attachment {
+	return freeagent.Attachment{
 		Data:        r.Data,
 		FileName:    r.FileName,
 		ContentType: r.ContentType,
 		Description: r.Description,
 	}
+}
+
+// attachmentList is the envelope the attachments sub-resource uses in both
+// directions: a POST body carries one, and every response returns the whole
+// set including anything that was already there.
+type attachmentList struct {
+	Attachments []freeagent.Attachment `json:"attachments"`
+}
+
+// attachmentsURL addresses the sub-resource of one explanation. Building it
+// as a ResourceURL rather than a path keeps the SDK's same-host check, which
+// is what stops a caller steering an upload at another server.
+func attachmentsURL(ref freeagent.ResourceURL) freeagent.ResourceURL {
+	return freeagent.ResourceURL(strings.TrimSuffix(ref.String(), "/") + "/attachments")
+}
+
+// attachmentsOf reads the files an explanation already carries.
+//
+// It asks the sub-resource rather than reading the explanation body, and that
+// is load-bearing rather than stylistic: from API version 2026-09-01 the
+// explanation has no singular attachment attribute, so a guard reading that
+// field would find nil every time and wave through every call. A guard that
+// fails open is worse than no guard, because it still reads like protection.
+func (c *Client) attachmentsOf(
+	ctx context.Context, ref freeagent.ResourceURL,
+) ([]freeagent.Attachment, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+
+	body, _, err := c.fa.RawURL(ctx, http.MethodGet, attachmentsURL(ref), nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("reading the attachments back: %w", err)
+	}
+	var list attachmentList
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, fmt.Errorf("decoding the attachments: %w", err)
+	}
+	return list.Attachments, nil
+}
+
+// addReceipt is the entire attachment write path.
+//
+// It is a POST to the sub-resource, which appends. There is no code here that
+// can reach the PUT the same endpoint offers, and that is the point: PUT is
+// where replacing a file's contents and deleting one both live, the latter as
+// a _destroy flag rather than a DELETE verb, so it would not look destructive
+// at the HTTP layer either.
+func (c *Client) addReceipt(
+	ctx context.Context, ref freeagent.ResourceURL, receipt Receipt,
+) ([]freeagent.Attachment, error) {
+	existing, err := c.attachmentsOf(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkRoom(existing, receipt.FileName); err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+
+	body, _, err := c.fa.RawURL(ctx, http.MethodPost, attachmentsURL(ref), nil,
+		attachmentList{Attachments: []freeagent.Attachment{receipt.attachment()}})
+	if err != nil {
+		return nil, fmt.Errorf("attaching the receipt: %w", err)
+	}
+
+	var after attachmentList
+	if err := json.Unmarshal(body, &after); err != nil {
+		return nil, fmt.Errorf("decoding the attachments: %w", err)
+	}
+	// The response is the full set, so this confirms the file landed instead
+	// of inferring it from a 2xx. Worth doing: a version mismatch would answer
+	// a POST cheerfully and store nothing.
+	if !hasName(after.Attachments, receipt.FileName) {
+		return nil, fmt.Errorf(
+			"the upload was accepted but %q is not among the %d attachments "+
+				"the API returned", receipt.FileName, len(after.Attachments))
+	}
+	return after.Attachments, nil
+}
+
+// checkRoom refuses a duplicate and a full explanation. Neither is a
+// destructive case, because POST appends; they are the two ways an append
+// still produces something nobody wanted.
+func checkRoom(existing []freeagent.Attachment, name string) error {
+	if hasName(existing, name) {
+		return fmt.Errorf("%w: %q", ErrAlreadyAttached, name)
+	}
+	if len(existing) >= maxAttachments {
+		return fmt.Errorf("%w: %d of %d used",
+			ErrTooManyAttachments, len(existing), maxAttachments)
+	}
+	return nil
+}
+
+func hasName(list []freeagent.Attachment, name string) bool {
+	for _, a := range list {
+		if strings.EqualFold(a.FileName, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // Request describes one explanation to create.
@@ -186,7 +318,10 @@ type Result struct {
 	RemainingAfter string                `json:"unexplained_after,omitempty"`
 	AttachedName   string                `json:"attached_file,omitempty"`
 	AttachedBytes  int                   `json:"attached_bytes,omitempty"`
-	AuditedAt      time.Time             `json:"audited_at"`
+	// Attachments is how many files the explanation carries afterwards, read
+	// from the API's own response rather than counted locally.
+	Attachments int       `json:"attachments,omitempty"`
+	AuditedAt   time.Time `json:"audited_at"`
 }
 
 // Explain creates an explanation for a transaction that still has an
@@ -225,6 +360,10 @@ func (c *Client) Explain(ctx context.Context, req Request) (*Result, error) {
 		dated = txn.DatedOn
 	}
 
+	// The receipt is deliberately not sent inline here. From API version
+	// 2026-09-01 attachments are managed only through the sub-resource, and an
+	// inline attachment that the server ignores rather than rejects would
+	// report a receipt this tool never filed.
 	value := req.GrossValue
 	created, _, err := c.fa.BankTransactionExplanations.Create(ctx,
 		&freeagent.BankTransactionExplanation{
@@ -234,7 +373,6 @@ func (c *Client) Explain(ctx context.Context, req Request) (*Result, error) {
 			GrossValue:      &value,
 			Category:        req.Category,
 			Description:     req.Description,
-			Attachment:      req.Receipt.attachment(),
 		})
 	if err != nil {
 		return nil, c.record("explain", req.auditFields(), nil,
@@ -248,11 +386,29 @@ func (c *Client) Explain(ctx context.Context, req Request) (*Result, error) {
 		UnexplainedWas: remaining.String(),
 		RemainingAfter: remaining.Sub(req.GrossValue).String(),
 	}
-	if req.Receipt != nil {
-		res.AttachedName = req.Receipt.FileName
-		res.AttachedBytes = len(req.Receipt.Data)
+	if err := c.record("explain", req.auditFields(), res, nil); err != nil {
+		return nil, err
 	}
-	return res, c.record("explain", req.auditFields(), res, nil)
+	if req.Receipt == nil {
+		return res, nil
+	}
+
+	// Two calls, so they can part-succeed. The explanation exists either way,
+	// and losing its URL to an error string would leave a caller unable to
+	// finish the job, so the URL goes in the message and attach_receipt can
+	// complete it.
+	after, err := c.addReceipt(ctx, created.URL, *req.Receipt)
+	fields := attachFields(created.URL, *req.Receipt)
+	if err != nil {
+		return nil, c.record("attach", fields, nil, fmt.Errorf(
+			"the explanation was created at %s but the receipt was not "+
+				"attached: %w; attach_receipt can add it", created.URL, err))
+	}
+
+	res.AttachedName = req.Receipt.FileName
+	res.AttachedBytes = len(req.Receipt.Data)
+	res.Attachments = len(after)
+	return res, c.record("attach", fields, res, nil)
 }
 
 // AttachRequest describes a file to add to an existing explanation.
@@ -261,11 +417,12 @@ type AttachRequest struct {
 	Receipt     Receipt
 }
 
-// AttachReceipt adds a file to an explanation that has none.
+// AttachReceipt adds a file to an existing explanation.
 //
-// Only the attachment is sent, so the update carries no other field that
-// could overwrite something already recorded, and an explanation that already
-// has a file is refused rather than having it replaced.
+// An explanation holds up to fifty files and the call appends to them, so this
+// no longer has to protect a stored receipt from being overwritten: nothing
+// reachable from here can overwrite one. What it still refuses is filing the
+// same receipt twice, and filling an explanation past the documented limit.
 func (c *Client) AttachReceipt(ctx context.Context, req AttachRequest) (*Result, error) {
 	if req.Explanation.IsZero() {
 		return nil, errors.New("an explanation URL is required")
@@ -274,41 +431,27 @@ func (c *Client) AttachReceipt(ctx context.Context, req AttachRequest) (*Result,
 		return nil, err
 	}
 
-	fields := map[string]any{
-		"explanation": req.Explanation.String(),
-		"file_name":   req.Receipt.FileName,
-		"file_bytes":  len(req.Receipt.Data),
-	}
-
-	existing, err := c.explanation(ctx, req.Explanation)
+	fields := attachFields(req.Explanation, req.Receipt)
+	after, err := c.addReceipt(ctx, req.Explanation, req.Receipt)
 	if err != nil {
 		return nil, c.record("attach", fields, nil, err)
-	}
-	if existing.Attachment != nil && !existing.Attachment.URL.IsZero() {
-		return nil, c.record("attach", fields, nil, ErrAlreadyAttached)
-	}
-
-	id, err := req.Explanation.ID()
-	if err != nil {
-		return nil, c.record("attach", fields, nil, err)
-	}
-
-	updated, _, err := c.fa.BankTransactionExplanations.Update(ctx, id,
-		&freeagent.BankTransactionExplanation{Attachment: req.Receipt.attachment()})
-	if err != nil {
-		return nil, c.record("attach", fields, nil,
-			fmt.Errorf("attaching the receipt: %w", err))
 	}
 
 	res := &Result{
-		Explanation:   updated.URL,
+		Explanation:   req.Explanation,
 		AttachedName:  req.Receipt.FileName,
 		AttachedBytes: len(req.Receipt.Data),
-	}
-	if res.Explanation.IsZero() {
-		res.Explanation = req.Explanation
+		Attachments:   len(after),
 	}
 	return res, c.record("attach", fields, res, nil)
+}
+
+func attachFields(ref freeagent.ResourceURL, receipt Receipt) map[string]any {
+	return map[string]any{
+		"explanation": ref.String(),
+		"file_name":   receipt.FileName,
+		"file_bytes":  len(receipt.Data),
+	}
 }
 
 // checkAmount is the guard. It refuses anything that would do more than fill
@@ -343,19 +486,6 @@ func (c *Client) transaction(
 		return nil, fmt.Errorf("reading the transaction back: %w", err)
 	}
 	return txn, nil
-}
-
-func (c *Client) explanation(
-	ctx context.Context, ref freeagent.ResourceURL,
-) (*freeagent.BankTransactionExplanation, error) {
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
-	defer cancel()
-
-	found, _, err := c.fa.BankTransactionExplanations.GetURL(ctx, ref)
-	if err != nil {
-		return nil, fmt.Errorf("reading the explanation back: %w", err)
-	}
-	return found, nil
 }
 
 func (r Request) auditFields() map[string]any {

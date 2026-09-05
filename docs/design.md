@@ -79,6 +79,12 @@ does not have.
 explanations. Sales invoices, estimates and credit notes have no attachment field, because their
 document is generated rather than uploaded. So there are two blob sources with different costs:
 
+This describes the shape at the API version the SDK pins, currently `2026-08-16`. From
+`2026-09-01` a bank transaction explanation carries an `attachments` array instead, and
+FreeAgent makes that the default on 1 December 2026. The pull path is insulated only for as
+long as the pin holds, so re-read this section when the SDK's `DefaultAPIVersion` moves.
+`internal/explain` already runs at the newer version; see section 13.
+
 - `attachment.content_src` (plus `_medium`, `_small`): a time-limited URL on a third-party host.
   No auth needed, and fetching it does not spend the API rate budget. `expires_at` is on the
   record, so a resumed download may need its metadata re-resolved through `Attachments.GetURL`.
@@ -444,9 +450,12 @@ own verbs when they do, never a flag on `pull`.
   build a writable one**. Structural, not a flag: the constructor for pull mode takes no
   writable parameter. The write path gets its own constructor and its own verbs.
 - One writable constructor exists, in `internal/explain`, reachable only from `famcp
-  -allow-writes`. It is bounded to two operations, each of which re-reads its target and
-  refuses unless the record still has a hole to fill, so it can add a record but never
-  overwrite one, and it appends every attempt to an audit file. See section 17.
+  -allow-writes`. It is bounded to two operations, neither of which can overwrite a stored
+  value: creating an explanation re-reads the transaction and refuses unless a balance is
+  still unexplained, and attaching a file appends to a sub-resource whose replace and delete
+  operations the package does not reach. Every attempt is appended to an audit file. It pins
+  `X-Api-Version` to `2026-09-01` for that endpoint; the read client keeps the SDK default,
+  so the two see different attachment shapes on purpose. See section 17.
 - Production is opt-in, per the SDK's existing convention.
 - Anonymised fixtures only. Real company data never enters the repo, a test, or a commit.
 - Secrets never land in the database. Tokens stay in the SDK's `0600` store.

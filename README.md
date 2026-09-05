@@ -414,11 +414,19 @@ they are bounded so that neither can change anything already recorded:
   transaction is re-read from the API immediately before writing, and the call
   is refused if it has since been explained, if the value runs the opposite way
   to the unexplained amount, or if it exceeds what is left.
-- `attach_receipt` adds a file to an explanation that has none. One that
-  already carries a file is refused rather than having it replaced.
+- `attach_receipt` adds a file to an explanation. An explanation holds up to 50,
+  and this appends, so a receipt somebody already filed cannot be replaced or
+  removed. A file whose name is already there is refused, so repeating the call
+  does not file the same receipt twice.
 
-Both only ever fill a gap. Nothing a person already decided can be overwritten
-or deleted, so the worst case is an unwanted record rather than a lost one.
+Nothing a person already decided can be overwritten or deleted, so the worst
+case is an unwanted record rather than a lost one.
+
+The write client pins `X-Api-Version: 2026-09-01`, which is what makes the
+append-only attachments endpoint available; FreeAgent makes that version the
+default on 1 December 2026, and stating it rather than inheriting it means that
+date changes nothing here. The read path is unaffected and stays on the SDK's
+own default.
 
 What no precondition can check is the category, and a well-formed explanation
 posted to the wrong one looks like clean data. Every attempt, written or
