@@ -149,7 +149,7 @@ func TestUnavailableFamilyIsNotSwept(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range result.Families {
-		if f.Family == "income_tax_returns" && f.Swept {
+		if f.Family == "income_tax_returns" && f.Sweep == SweepDone {
 			t.Error("an unavailable family was swept")
 		}
 	}

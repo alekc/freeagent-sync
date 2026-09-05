@@ -30,6 +30,16 @@ const DefaultConcurrency = 4
 // this cadence is the only thing that ever notices a removal.
 const DefaultReconcileInterval = 7 * 24 * time.Hour
 
+// DefaultMaxSweepFraction is the share of a family's live records a sweep may
+// remove before it is refused. Genuine upstream deletion is a trickle; a bulk
+// hit is nearly always a read that came back short.
+const DefaultMaxSweepFraction = 0.10
+
+// MinSweepFloor is the live-record count below which a fraction says nothing:
+// a three-record family losing one is a third of it. Smaller families are
+// swept without a bound.
+const MinSweepFloor = 20
+
 // Engine archives one account.
 type Engine struct {
 	db      *store.DB
@@ -77,6 +87,14 @@ type Options struct {
 	ReconcileIfDue bool
 	// ReconcileInterval overrides DefaultReconcileInterval.
 	ReconcileInterval time.Duration
+	// DryRun computes each sweep and reports it without deleting anything.
+	// The read still archives: last_seen_at is what the sweep set is derived
+	// from, so there is nothing to preview without it.
+	DryRun bool
+	// MaxSweepFraction bounds a sweep to a share of a family's live records.
+	// Zero means DefaultMaxSweepFraction, so a caller that never heard of the
+	// bound still gets it. One or more removes it.
+	MaxSweepFraction float64
 }
 
 func (o *Options) applyDefaults() {
@@ -89,22 +107,47 @@ func (o *Options) applyDefaults() {
 	if o.ReconcileInterval == 0 {
 		o.ReconcileInterval = DefaultReconcileInterval
 	}
+	if o.MaxSweepFraction == 0 {
+		o.MaxSweepFraction = DefaultMaxSweepFraction
+	}
 	if o.Mode == "" {
 		o.Mode = store.ModeIncremental
 	}
 }
 
+// SweepState is what happened to one family's sweep. A bool cannot separate
+// "checked, nothing gone" from "not checked", and reporting both as zero is
+// how a sweep that never ran reads as a clean one.
+type SweepState string
+
+// The terminal states a family's sweep can reach.
+const (
+	// SweepNone: not asked for, or the family has nothing to sweep.
+	SweepNone SweepState = ""
+	// SweepSkipped: asked for, but the read did not cover the whole family.
+	SweepSkipped SweepState = "skipped"
+	// SweepRefused: the sweep set exceeded MaxSweepFraction of live records.
+	SweepRefused SweepState = "refused"
+	// SweepPreview: computed under DryRun, with the delete withheld.
+	SweepPreview SweepState = "dry-run"
+	// SweepDone: the sweep ran and its count is real.
+	SweepDone SweepState = "swept"
+)
+
 // FamilyResult is what happened to one job: a family, or one scope of one.
 type FamilyResult struct {
-	Family        string
-	Scope         string
-	Label         string
-	Pages         int
-	Stats         store.UpsertStats
+	Family string
+	Scope  string
+	Label  string
+	Pages  int
+	Stats  store.UpsertStats
+	// Deleted is the size of the sweep set: removed when Sweep is SweepDone,
+	// and what would have been removed under SweepPreview or SweepRefused.
+	// Read it with Sweep, never on its own.
 	Deleted       int64
 	Cursor        time.Time
 	CursorAdvance bool
-	Swept         bool
+	Sweep         SweepState
 	FullScan      bool
 	// Unavailable marks a family this company does not have: the API answered
 	// 403 or 404. A fact about the company, not a failure.
@@ -181,7 +224,11 @@ func (e *Engine) Pull(ctx context.Context, opts Options) (Result, error) {
 	result.Families = results
 	for _, f := range results {
 		result.Stats.Add(f.Stats)
-		result.Deleted += f.Deleted
+		// Only a sweep that ran contributes: a preview or a refusal carries a
+		// count of what it would have removed, which is not a deletion.
+		if f.Sweep == SweepDone {
+			result.Deleted += f.Deleted
+		}
 	}
 	result.Requests = e.client.Requests()
 	result.Outcome = outcomeFor(ctx, results, budget)
@@ -387,40 +434,70 @@ func (e *Engine) sweepFamilies(
 		}
 		jobs := jobsForFamily(results, family)
 
-		due, err := e.sweepDue(ctx, family, jobs, opts)
+		asked, err := e.sweepAsked(ctx, family, opts)
 		if err != nil {
 			markFamilyError(results, family, err)
 			continue
 		}
-		if !due {
+		// A family this company does not have is not a family the read failed
+		// to cover, and reporting it as one would put every absent feature in
+		// the "not fully read" count on every run.
+		if !asked || familyUnavailable(jobs) {
+			continue
+		}
+		if !readCoveredFamily(jobs) {
+			// Asked for and refused, which must not read as swept clean.
+			setSweep(results, family, SweepSkipped, 0)
 			continue
 		}
 
-		deleted, err := e.db.SoftDeleteUnseen(
-			ctx, e.account.ID, family, earliestSweepStart(jobs), runID)
+		start := earliestSweepStart(jobs)
+		unseen, err := e.db.CountUnseen(ctx, e.account.ID, family, start)
 		if err != nil {
 			markFamilyError(results, family, err)
 			continue
 		}
-		recordSweep(results, family, deleted)
+
+		// Bounded before the write and under a dry run alike, so a preview is
+		// a faithful answer to what a real sweep would do rather than a more
+		// permissive one.
+		bound := sweepBound{
+			unseen: unseen, added: addedThisRun(jobs), max: opts.MaxSweepFraction,
+		}
+		if err := e.checkSweepBound(ctx, family, bound); err != nil {
+			setSweep(results, family, SweepRefused, unseen)
+			markFamilyError(results, family, err)
+			continue
+		}
+
+		if opts.DryRun {
+			// No SaveReconcile either: recording a sweep that did not happen
+			// would silence --reconcile-if-due for a whole interval.
+			setSweep(results, family, SweepPreview, unseen)
+			continue
+		}
+
+		deleted, err := e.db.SoftDeleteUnseen(ctx, e.account.ID, family, start, runID)
+		if err != nil {
+			markFamilyError(results, family, err)
+			continue
+		}
+		setSweep(results, family, SweepDone, deleted)
 
 		if err := e.db.SaveReconcile(
-			ctx, e.account.ID, family, "", earliestSweepStart(jobs), runID); err != nil {
+			ctx, e.account.ID, family, "", start, runID); err != nil {
 			markFamilyError(results, family, err)
 		}
 	}
 }
 
-// sweepDue decides whether a family may be swept: every one of its jobs must
-// have completed a full read, and a sweep must have been asked for.
-func (e *Engine) sweepDue(
-	ctx context.Context, family string, jobs []FamilyResult, opts Options,
+// sweepAsked reports whether this run wants a sweep of this family: a question
+// about the caller's flags and the cadence, never about what the read managed
+// to cover. Those two were one condition once, which is how a short read swept
+// anyway.
+func (e *Engine) sweepAsked(
+	ctx context.Context, family string, opts Options,
 ) (bool, error) {
-	for _, j := range jobs {
-		if !j.completed || !j.FullScan || j.Unavailable {
-			return false, nil
-		}
-	}
 	if opts.Reconcile {
 		return true, nil
 	}
@@ -436,6 +513,81 @@ func (e *Engine) sweepDue(
 		return true, nil
 	}
 	return time.Since(state.LastFullReconcile) >= opts.ReconcileInterval, nil
+}
+
+// familyUnavailable reports whether this company has the family at all. One
+// bank account answering 403 does not mean the company has no bank
+// transactions, so every job has to say so.
+func familyUnavailable(jobs []FamilyResult) bool {
+	for _, j := range jobs {
+		if !j.Unavailable {
+			return false
+		}
+	}
+	return len(jobs) > 0
+}
+
+// readCoveredFamily reports whether every one of a family's jobs completed a
+// full read. Only then does "the read did not see it" mean "the far end no
+// longer has it".
+func readCoveredFamily(jobs []FamilyResult) bool {
+	for _, j := range jobs {
+		if !j.completed || !j.FullScan || j.Unavailable {
+			return false
+		}
+	}
+	return true
+}
+
+// sweepBound is what the bound is measured from: the size of the sweep set,
+// how much of the family this run itself made live, and the share allowed.
+type sweepBound struct {
+	unseen int64
+	added  int64
+	max    float64
+}
+
+// addedThisRun counts the records this run made live in a family, whether new
+// or brought back. Neither can be in the sweep set, so leaving them in the
+// denominator would let a read that replaced a family wholesale look small.
+func addedThisRun(jobs []FamilyResult) int64 {
+	var n int64
+	for _, j := range jobs {
+		n += int64(j.Stats.Inserted + j.Stats.Restored)
+	}
+	return n
+}
+
+// checkSweepBound refuses a sweep that would remove more of a family than the
+// caller allowed. Upstream deletion is a trickle; a bulk hit is nearly always
+// a read that came back short, and that is the case a sweep must not act on.
+func (e *Engine) checkSweepBound(
+	ctx context.Context, family string, b sweepBound,
+) error {
+	if b.unseen == 0 || b.max >= 1 {
+		return nil
+	}
+	live, err := e.db.LiveRecordCount(ctx, e.account.ID, family)
+	if err != nil {
+		return err
+	}
+	// Measured against what the family held before this run, not after it: a
+	// far end answering four hundred new records instead of the forty it had
+	// would otherwise dilute its own deletion to under a tenth.
+	before := live - b.added
+	// Below the floor a fraction is noise, so the bound does not apply.
+	if before < MinSweepFloor {
+		return nil
+	}
+	if fraction := float64(b.unseen) / float64(before); fraction > b.max {
+		return fmt.Errorf(
+			"engine: refusing to sweep %s: %d of the %d records held before this "+
+				"run (%.1f%%) is over the %.1f%% bound, which usually means the "+
+				"read came back short; check the run, or raise "+
+				"-max-sweep-fraction deliberately",
+			family, b.unseen, before, fraction*100, b.max*100)
+	}
+	return nil
 }
 
 // archivePage converts a page into records and writes them, returning the
@@ -568,18 +720,19 @@ func earliestSweepStart(jobs []FamilyResult) time.Time {
 	return earliest
 }
 
-// recordSweep attributes a family's deletions to its first job, so the total
-// is counted once rather than once per scope.
-func recordSweep(results []FamilyResult, family string, deleted int64) {
+// setSweep records a family's sweep outcome on every one of its jobs and the
+// count on the first, so a fan-out reports the total once rather than once per
+// scope.
+func setSweep(results []FamilyResult, family string, state SweepState, n int64) {
+	first := true
 	for i := range results {
-		if results[i].Family == family {
-			results[i].Swept = true
+		if results[i].Family != family {
+			continue
 		}
-	}
-	for i := range results {
-		if results[i].Family == family {
-			results[i].Deleted = deleted
-			return
+		results[i].Sweep = state
+		if first {
+			results[i].Deleted = n
+			first = false
 		}
 	}
 }

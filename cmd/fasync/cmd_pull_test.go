@@ -510,6 +510,205 @@ func TestMergedRowIsUnavailableOnlyIfEveryScopeWas(t *testing.T) {
 	}
 }
 
+// The report has to answer "was this checked" separately from "was anything
+// gone". Printing 0 for both is what made a skipped sweep read as a clean one.
+func TestGoneColumnSeparatesCheckedFromClean(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   engine.FamilyResult
+		want any
+	}{
+		{"swept clean", engine.FamilyResult{Sweep: engine.SweepDone}, int64(0)},
+		{"swept", engine.FamilyResult{Sweep: engine.SweepDone, Deleted: 4}, int64(4)},
+		{"previewed", engine.FamilyResult{Sweep: engine.SweepPreview, Deleted: 4}, int64(4)},
+		{"refused", engine.FamilyResult{Sweep: engine.SweepRefused, Deleted: 90}, int64(90)},
+		{"skipped", engine.FamilyResult{Sweep: engine.SweepSkipped}, "-"},
+		{"never asked", engine.FamilyResult{}, "-"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := goneCell(tc.in); got != tc.want {
+				t.Errorf("gone cell = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// The two zeros are the whole point: they must not render alike.
+	clean := goneCell(engine.FamilyResult{Sweep: engine.SweepDone})
+	skipped := goneCell(engine.FamilyResult{Sweep: engine.SweepSkipped})
+	if clean == skipped {
+		t.Errorf("a clean sweep and a skipped one both render as %v", clean)
+	}
+}
+
+// The note carries why, since the Gone column can only say whether.
+func TestFamilyNoteNamesTheSweepState(t *testing.T) {
+	t.Parallel()
+	for _, state := range []engine.SweepState{
+		engine.SweepDone, engine.SweepSkipped, engine.SweepRefused, engine.SweepPreview,
+	} {
+		note := familyNote(engine.FamilyResult{Sweep: state})
+		if !strings.Contains(note, string(state)) {
+			t.Errorf("note %q does not mention %q", note, state)
+		}
+	}
+	if note := familyNote(engine.FamilyResult{}); note != "" {
+		t.Errorf("note = %q for a family with no sweep, want empty", note)
+	}
+}
+
+// "0 gone" on its own cannot say whether anything was checked, so the summary
+// names how many families were actually swept.
+func TestSweepSummarySaysHowManyFamiliesWereSwept(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		rows []engine.FamilyResult
+		want string
+	}{
+		{
+			"nothing swept",
+			[]engine.FamilyResult{{Family: "bills"}},
+			"no family swept",
+		},
+		{
+			"swept clean",
+			[]engine.FamilyResult{{Family: "bills", Sweep: engine.SweepDone}},
+			"0 gone from 1 family swept",
+		},
+		{
+			"dry run",
+			[]engine.FamilyResult{
+				{Family: "bills", Sweep: engine.SweepPreview, Deleted: 7},
+			},
+			"7 would go from 1 family",
+		},
+		// A sweep is per family, not per bank account. --by-scope hands the
+		// summary one row per account, and counting those turned one swept
+		// family into as many as the company has accounts.
+		{
+			"a fan-out family under --by-scope",
+			[]engine.FamilyResult{
+				{Family: "bank_transactions", Scope: "acct/1",
+					Sweep: engine.SweepDone, Deleted: 6},
+				{Family: "bank_transactions", Scope: "acct/2", Sweep: engine.SweepDone},
+				{Family: "bank_transactions", Scope: "acct/3", Sweep: engine.SweepDone},
+			},
+			"6 gone from 1 family swept",
+		},
+		{
+			"a fan-out family the read did not cover",
+			[]engine.FamilyResult{
+				{Family: "bank_transactions", Scope: "acct/1", Sweep: engine.SweepSkipped},
+				{Family: "bank_transactions", Scope: "acct/2", Sweep: engine.SweepSkipped},
+			},
+			"no family swept, 1 not fully read",
+		},
+		{
+			"refused and skipped",
+			[]engine.FamilyResult{
+				{Family: "bills", Sweep: engine.SweepRefused, Deleted: 900},
+				{Family: "invoices", Sweep: engine.SweepSkipped},
+			},
+			"no family swept, 1 refused, 1 not fully read",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sweepSummary(tc.rows); got != tc.want {
+				t.Errorf("summary = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A negative share is a typo, not an instruction, and would otherwise become a
+// bound no sweep can satisfy.
+func TestNegativeMaxSweepFractionIsRejected(t *testing.T) {
+	t.Parallel()
+	flags := pullFlags{maxSweepFraction: -1}
+
+	if _, err := flags.options(pullNow); err == nil {
+		t.Fatal("a negative -max-sweep-fraction was accepted")
+	}
+}
+
+// The sweep is family-wide, so under --by-scope only one of a family's rows
+// can carry its count. A 0 in the others would claim each of those accounts
+// was swept and found clean, which nothing checked.
+func TestByScopeRowsDoNotEachClaimTheSweep(t *testing.T) {
+	t.Parallel()
+	cells := goneCells([]engine.FamilyResult{
+		{Family: "bills", Sweep: engine.SweepDone, Deleted: 2},
+		{Family: "bank_transactions", Scope: "acct/1", Sweep: engine.SweepDone,
+			Deleted: 6},
+		{Family: "bank_transactions", Scope: "acct/2", Sweep: engine.SweepDone},
+		{Family: "bank_transactions", Scope: "acct/3", Sweep: engine.SweepDone},
+	})
+
+	want := []any{int64(2), int64(6), "", ""}
+	if len(cells) != len(want) {
+		t.Fatalf("rendered %d cells, want %d", len(cells), len(want))
+	}
+	for i, w := range want {
+		if cells[i] != w {
+			t.Errorf("row %d gone cell = %v, want %v", i, cells[i], w)
+		}
+	}
+}
+
+// Zero is the engine's "use the default", so obeying an explicit 0 would arm
+// the sweep at 10% for someone who typed it meaning "delete nothing".
+func TestExplicitZeroMaxSweepFractionIsRejected(t *testing.T) {
+	t.Parallel()
+	parse := func(args ...string) error {
+		var flags pullFlags
+		fs := flag.NewFlagSet("pull", flag.ContinueOnError)
+		flags.register(fs)
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		return flags.validate(fs)
+	}
+
+	err := parse("--max-sweep-fraction", "0")
+	if err == nil {
+		t.Fatal("-max-sweep-fraction 0 was accepted and silently became the default")
+	}
+	if !strings.Contains(err.Error(), "dry-run") {
+		t.Errorf("error = %q, want it to point at what the caller meant", err)
+	}
+	// Not passing it at all is how the default is asked for, and must not trip
+	// the same check.
+	if err := parse(); err != nil {
+		t.Errorf("an unset -max-sweep-fraction was rejected: %v", err)
+	}
+}
+
+// NaN parses, is not the zero that means "use the default", and loses every
+// comparison in the guard, so an unrejected one leaves the sweep unbounded
+// while the run still reports a bound. Negative refuses every sweep instead.
+func TestUnusableMaxSweepFractionsAreRejected(t *testing.T) {
+	t.Parallel()
+	for _, arg := range []string{"NaN", "-0.5"} {
+		t.Run(arg, func(t *testing.T) {
+			t.Parallel()
+			var flags pullFlags
+			fs := flag.NewFlagSet("pull", flag.ContinueOnError)
+			flags.register(fs)
+			if err := fs.Parse([]string{"--max-sweep-fraction", arg}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := flags.options(pullNow); err == nil {
+				t.Errorf("-max-sweep-fraction %s was accepted as a bound", arg)
+			}
+		})
+	}
+}
+
 // --by-scope is how the per-account detail is still reachable.
 func TestByScopeKeepsEveryRow(t *testing.T) {
 	t.Parallel()

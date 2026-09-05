@@ -219,7 +219,7 @@ func TestIncrementalRunDoesNotSweep(t *testing.T) {
 	h.fake.set("bills")
 	result := h.pull(Options{Mode: store.ModeIncremental, Reconcile: true})
 
-	if h.familyResult(result, "bills").Swept {
+	if h.familyResult(result, "bills").Sweep == SweepDone {
 		t.Error("an incremental run swept, which would delete everything it did not re-read")
 	}
 	if got := h.liveCount("bills"); got != 2 {
@@ -329,15 +329,17 @@ func TestReconcileIfDueSkipsARecentSweep(t *testing.T) {
 	first := h.pull(Options{
 		Mode: store.ModeFull, ReconcileIfDue: true, ReconcileInterval: time.Hour,
 	})
-	if !h.familyResult(first, "bills").Swept {
+	if h.familyResult(first, "bills").Sweep != SweepDone {
 		t.Fatal("the first run did not sweep a never-swept family")
 	}
 
 	second := h.pull(Options{
 		Mode: store.ModeFull, ReconcileIfDue: true, ReconcileInterval: time.Hour,
 	})
-	if h.familyResult(second, "bills").Swept {
-		t.Error("a sweep ran again inside its interval")
+	// Not merely "did not sweep": inside the interval no sweep is evaluated at
+	// all, so refused, skipped or dry-run would each be a regression too.
+	if got := h.familyResult(second, "bills").Sweep; got != SweepNone {
+		t.Errorf("sweep = %q, want none evaluated inside its interval", got)
 	}
 }
 
