@@ -3,7 +3,7 @@ module github.com/alekc/freeagent-sync
 go 1.26.0
 
 require (
-	github.com/alekc/freeagent v0.1.0
+	github.com/alekc/freeagent v0.1.1
 	github.com/gofrs/flock v0.13.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/jedib0t/go-pretty/v6 v6.8.3

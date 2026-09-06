@@ -1,5 +1,5 @@
-github.com/alekc/freeagent v0.1.0 h1:RJfXKcWiN8mwFF82YENTZBPFVItLWfxL/PS2NiYpt40=
-github.com/alekc/freeagent v0.1.0/go.mod h1:EGL1mbhY3EQhglhZ2VcvIbj13mUWAKl2dDuE2hu8dQQ=
+github.com/alekc/freeagent v0.1.1 h1:sdqINvq45TCW/znTauM9vihtcKBe9qE/0sDF2Jxvnw4=
+github.com/alekc/freeagent v0.1.1/go.mod h1:EGL1mbhY3EQhglhZ2VcvIbj13mUWAKl2dDuE2hu8dQQ=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=

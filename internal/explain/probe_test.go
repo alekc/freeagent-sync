@@ -13,8 +13,8 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// probe reads one explanation as a raw map, so fields the SDK struct calls
-// read-only are still visible.
+// probe reads one explanation as a raw map, so what the wire actually carries
+// is visible rather than whatever the SDK struct chose to model.
 func (s *liveSetup) probe(
 	ctx context.Context, t *testing.T, ref freeagent.ResourceURL,
 ) map[string]any {
@@ -30,8 +30,8 @@ func (s *liveSetup) probe(
 	return env["bank_transaction_explanation"]
 }
 
-// explainRaw posts an explanation with an arbitrary body, so fields the SDK
-// omits can be sent.
+// explainRaw posts an explanation with an arbitrary body, so a field can be
+// sent whether or not the SDK models it as writable.
 func (s *liveSetup) explainRaw(
 	ctx context.Context, t *testing.T, fields map[string]any,
 ) freeagent.ResourceURL {
@@ -55,8 +55,9 @@ func (s *liveSetup) explainRaw(
 }
 
 // TestProbeMarkedForReview answers whether marked_for_review can be written.
-// FreeAgent documents it as read-only and the SDK marks it read-only, so the
-// expected answer throughout is no.
+// It can. FreeAgent's documentation says nothing either way, and the SDK's
+// read-only grouping was the library's own mistake, fixed in v0.1.1 where the
+// live suite now asserts the write. This probe is what established it.
 func TestProbeMarkedForReview(t *testing.T) {
 	s := liveClient(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
