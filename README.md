@@ -446,12 +446,14 @@ has not confirmed. `list_bank_transactions` with `view=marked_for_review` finds
 them, and confirming them stays a job for the FreeAgent interface, but not for
 the reason previously given here.
 
-FreeAgent documents the field as read-only and the SDK's struct says the same.
-Probed against the sandbox on 2026-09-05, it is neither: a create that sends
-`marked_for_review: true` gets it back as true where an ordinary create reports
-false, a `PUT` sending false clears it, and the account's
-`marked_for_review_count` follows both ways. What does not clear it is an
-unrelated edit, so a description-only update leaves the flag standing.
+The SDK's struct listed the field under a read-only comment, and this file said
+FreeAgent's documentation did the same. It does not: the attributes table marks
+`type` and `capital_asset` read-only and says nothing either way about
+`marked_for_review`. Probed against the sandbox on 2026-09-05, the field is
+writable: a create that sends `marked_for_review: true` gets it back as true
+where an ordinary create reports false, a `PUT` sending false clears it, and the
+account's `marked_for_review_count` follows both ways. What does not clear it is
+an unrelated edit, so a description-only update leaves the flag standing.
 
 This tool still will not clear it, and that is now a choice rather than a
 limit. Confirming somebody's guessed explanation is a judgement about their
