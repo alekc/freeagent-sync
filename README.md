@@ -413,7 +413,10 @@ they are bounded so that neither can change anything already recorded:
   unexplained balance, optionally attaching a receipt in the same call. The
   transaction is re-read from the API immediately before writing, and the call
   is refused if it has since been explained, if the value runs the opposite way
-  to the unexplained amount, or if it exceeds what is left.
+  to the unexplained amount, or if it exceeds what is left. Its category URL
+  comes from `list_categories`, which is served on its own because categories
+  arrive grouped across four envelope keys and so are not picked up by the
+  generic collection sweep.
 - `attach_receipt` adds a file to an explanation. An explanation holds up to 50,
   and this appends, so a receipt somebody already filed cannot be replaced or
   removed. A file whose name is already there is refused, so repeating the call

@@ -78,6 +78,17 @@ func newServer(c *api.Client, w *explain.Client, account store.Account) *mcp.Ser
 			Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true},
 		}, listBankTransactions(c, meta))
 	}
+	if meta, ok := freeagent.Resources[categoryFamily]; ok {
+		mcp.AddTool(s, &mcp.Tool{
+			Name: "list_categories",
+			Description: "The accounting categories money can be assigned to, " +
+				"flattened out of the four groups the API returns them in. This " +
+				"is where a category URL for explaining a transaction comes " +
+				"from. Docs: " + meta.Doc,
+			OutputSchema: listOutputSchema,
+			Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true},
+		}, listCategories(c))
+	}
 	if w != nil {
 		registerWriteTools(s, w)
 	}
@@ -91,6 +102,11 @@ const bankTransactionFamily = "bank_transactions"
 // companyFamily is the one singleton this build serves. Every other singleton
 // is a report, which needs its own window handling.
 const companyFamily = "company"
+
+// categoryFamily is grouped rather than a plain collection, so it is not in
+// servableCollections. It still needs a tool, because explain_transaction
+// takes a category URL and this is the only place to read one.
+const categoryFamily = "categories"
 
 // servableCollections are the families this build exposes: plain paged
 // collections with a plural envelope key. The set is derived from the SDK
@@ -216,6 +232,67 @@ func listBankTransactions(
 		}
 		out, err := walk(ctx, c, meta, opts, in.effectiveLimit())
 		return nil, out, err
+	}
+}
+
+type categoryListInput struct {
+	SubAccounts bool `json:"sub_accounts,omitempty" jsonschema:"also return the per-bank-account, stock item and capital asset sub-categories, which are numerous and rarely the right answer"`
+}
+
+// categoryRecord is the flat shape this tool answers with. The SDK's Category
+// carries its envelope in a field tagged json:"-", so marshalling one straight
+// loses the group, which is the field a caller actually chooses on.
+type categoryRecord struct {
+	URL              string `json:"url"`
+	Group            string `json:"group"`
+	NominalCode      string `json:"nominal_code,omitempty"`
+	Description      string `json:"description,omitempty"`
+	GroupDescription string `json:"group_description,omitempty"`
+	AllowableForTax  *bool  `json:"allowable_for_tax,omitempty"`
+	AutoSalesTaxRate string `json:"auto_sales_tax_rate,omitempty"`
+}
+
+// listCategories serves the one grouped family this build exposes. Categories
+// are not a plain collection, so servableCollections skips them, which left
+// explain_transaction naming a tool that did not exist.
+func listCategories(c *api.Client) mcp.ToolHandlerFor[categoryListInput, listOutput] {
+	return func(
+		ctx context.Context, _ *mcp.CallToolRequest, in categoryListInput,
+	) (*mcp.CallToolResult, listOutput, error) {
+		groups, _, err := c.SDK().Categories.List(ctx, in.SubAccounts)
+		if err != nil {
+			return nil, listOutput{}, err
+		}
+		flat := groups.Flatten()
+		// Flatten ranges a map, so its order differs between calls. Sort it, or
+		// the same question answers in a different order each time and a caller
+		// diffing two answers sees changes that are not there.
+		slices.SortFunc(flat, func(a, b freeagent.Category) int {
+			if n := cmpString(a.Group, b.Group); n != 0 {
+				return n
+			}
+			return cmpString(a.NominalCode, b.NominalCode)
+		})
+
+		// The endpoint is not paged: one call is the whole answer, so there is
+		// nothing to truncate and Pages is always the single read.
+		out := listOutput{Family: categoryFamily, Pages: 1, Count: len(flat)}
+		for _, item := range flat {
+			raw, err := json.Marshal(categoryRecord{
+				URL:              item.URL.String(),
+				Group:            item.Group,
+				NominalCode:      item.NominalCode,
+				Description:      item.Description,
+				GroupDescription: item.GroupDescription,
+				AllowableForTax:  item.AllowableForTax,
+				AutoSalesTaxRate: item.AutoSalesTaxRate,
+			})
+			if err != nil {
+				return nil, listOutput{}, fmt.Errorf("encoding category %s: %w", item.NominalCode, err)
+			}
+			out.Records = append(out.Records, raw)
+		}
+		return nil, out, nil
 	}
 }
 

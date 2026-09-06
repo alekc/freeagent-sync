@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -344,6 +345,10 @@ func TestToolListCoversCollectionsAndExcludesScopedFamilies(t *testing.T) {
 		// Bank-scoped, but its bank_account parameter is modelled, so it is
 		// served rather than withheld.
 		"list_bank_transactions",
+		// Grouped rather than a plain collection, so servableCollections does
+		// not reach it, but explain_bank_transaction needs a category URL and
+		// there is nowhere else to read one.
+		"list_categories",
 	} {
 		if !names[want] {
 			t.Errorf("%s is missing from the tool list", want)
@@ -357,6 +362,55 @@ func TestToolListCoversCollectionsAndExcludesScopedFamilies(t *testing.T) {
 	} {
 		if names[unwanted] {
 			t.Errorf("%s is offered but its required parameters are not modelled yet", unwanted)
+		}
+	}
+}
+
+// toolReference finds every tool name a description points the model at. The
+// model cannot tell a real tool name from an invented one, so a dangling
+// reference is not a typo, it is an instruction to call something absent.
+var toolReference = regexp.MustCompile(`\b(?:list|get)_[a-z_]+\b`)
+
+// Descriptions tell the model where to get a field, and explain_bank_transaction
+// pointed at list_categories for months while no such tool was registered:
+// categories are grouped, so servableCollections skipped them and nothing
+// noticed the promise was empty. Pin the class, not that one case.
+func TestToolDescriptionsOnlyNameToolsThatExist(t *testing.T) {
+	t.Parallel()
+	session := connectServerWithWrites(t, &fakeAPI{plural: "invoices", perPage: 10}, true)
+
+	tools := map[string]*mcp.Tool{}
+	for tool, err := range session.Tools(t.Context(), nil) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		tools[tool.Name] = tool
+	}
+	if len(tools) == 0 {
+		t.Fatal("no tools were registered, so this test would pass vacuously")
+	}
+
+	// Both surfaces carry prose: the tool's own description and the per-field
+	// jsonschema descriptions, which is where this bug actually lived.
+	for name, tool := range tools {
+		prose := []string{tool.Description}
+		// The input schema arrives as decoded JSON rather than a typed schema,
+		// and the field descriptions are where this bug lived, so scan the
+		// whole encoded schema instead of walking a shape that is not there.
+		if tool.InputSchema != nil {
+			encoded, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatalf("encoding the input schema of %s: %v", name, err)
+			}
+			prose = append(prose, string(encoded))
+		}
+		for _, text := range prose {
+			for _, ref := range toolReference.FindAllString(text, -1) {
+				if _, ok := tools[ref]; !ok {
+					t.Errorf("%s points the model at %q, which is not a registered tool: %s",
+						name, ref, text)
+				}
+			}
 		}
 	}
 }
