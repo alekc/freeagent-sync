@@ -7,6 +7,7 @@ import (
 
 	"github.com/alekc/freeagent"
 
+	"github.com/alekc/freeagent-sync/internal/family"
 	"github.com/alekc/freeagent-sync/internal/store"
 )
 
@@ -253,33 +254,8 @@ func TestProbeWithoutScopesConcludesNothing(t *testing.T) {
 	}
 }
 
-// The classes have to match what the API actually requires, since every one of
-// these was a live failure.
-func TestClassificationMatchesTheAPI(t *testing.T) {
-	t.Parallel()
-	tests := map[string]Class{
-		"notes":              ClassParentScoped,
-		"income_tax_returns": ClassUserScoped,
-		"bank_transactions":  ClassBankScoped,
-		"payroll":            ClassYearScoped,
-		"company":            ClassSingleton,
-		"trial_balance":      ClassReport,
-		"invoices":           ClassCollection,
-		"categories":         ClassGrouped,
-		"attachments":        ClassChildOnly,
-	}
-	for family, want := range tests {
-		meta, ok := freeagent.Resources[family]
-		if !ok {
-			t.Errorf("the SDK has no %s entry", family)
-			continue
-		}
-		if got := Classify(meta); got != want {
-			t.Errorf("Classify(%s) = %s, want %s", family, got, want)
-		}
-	}
-}
-
+// Classification itself is tested in internal/family, which owns it. What
+// belongs here is the engine's own predicate over that classification.
 func TestProbeableExcludesTheUnfilterable(t *testing.T) {
 	t.Parallel()
 	probeable := map[string]bool{
@@ -288,14 +264,14 @@ func TestProbeableExcludesTheUnfilterable(t *testing.T) {
 		"company":            false, "trial_balance": false, "payroll": false,
 		"attachments": false,
 	}
-	for family, want := range probeable {
-		meta, ok := freeagent.Resources[family]
+	for name, want := range probeable {
+		meta, ok := freeagent.Resources[name]
 		if !ok {
-			t.Fatalf("the SDK has no %s entry", family)
+			t.Fatalf("the SDK has no %s entry", name)
 		}
 		if got := Probeable(meta); got != want {
 			t.Errorf("Probeable(%s) = %v, want %v (%s)",
-				family, got, want, Classify(meta))
+				name, got, want, family.Classify(meta))
 		}
 	}
 }

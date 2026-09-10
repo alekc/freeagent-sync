@@ -19,6 +19,10 @@ build:
 fasync:
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BIN)/fasync ./cmd/fasync
 
+.PHONY: famcp
+famcp:
+	$(GO) build -ldflags '$(LDFLAGS)' -o $(BIN)/famcp ./cmd/famcp
+
 .PHONY: install
 install:
 	$(GO) install -ldflags '$(LDFLAGS)' ./cmd/fasync

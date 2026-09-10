@@ -9,6 +9,7 @@ import (
 
 	"github.com/alekc/freeagent"
 
+	"github.com/alekc/freeagent-sync/internal/family"
 	"github.com/alekc/freeagent-sync/internal/store"
 )
 
@@ -80,17 +81,17 @@ func (e *Engine) plan(
 
 	var jobs []job
 	for _, meta := range families {
-		switch Classify(meta) {
-		case ClassYearScoped:
+		switch family.Classify(meta) {
+		case family.ClassYearScoped:
 			jobs = append(jobs, e.payrollJobs(ctx, meta, now)...)
 
-		case ClassSingleton:
+		case family.ClassSingleton:
 			jobs = append(jobs, job{kind: kindDocument, meta: meta, label: meta.Name})
 
-		case ClassReport:
+		case family.ClassReport:
 			jobs = append(jobs, job{kind: kindReport, meta: meta, label: meta.Name})
 
-		case ClassUserScoped:
+		case family.ClassUserScoped:
 			narrowed, err := e.userScopes(ctx, meta)
 			if err != nil {
 				return nil, err
@@ -105,8 +106,8 @@ func (e *Engine) plan(
 				})
 			}
 
-		case ClassBankScoped, ClassParentScoped:
-			for _, narrowed := range scopes[Classify(meta)] {
+		case family.ClassBankScoped, family.ClassParentScoped:
+			for _, narrowed := range scopes[family.Classify(meta)] {
 				jobs = append(jobs, job{
 					kind:  kindCollection,
 					meta:  meta,
@@ -129,27 +130,27 @@ func (e *Engine) plan(
 // for their own lookup.
 func (e *Engine) scopesFor(
 	ctx context.Context, families []freeagent.ResourceMeta,
-) (map[Class][]scope, error) {
-	needed := map[Class]bool{}
+) (map[family.Class][]scope, error) {
+	needed := map[family.Class]bool{}
 	for _, meta := range families {
-		switch class := Classify(meta); class {
-		case ClassBankScoped, ClassParentScoped, ClassUserScoped:
+		switch class := family.Classify(meta); class {
+		case family.ClassBankScoped, family.ClassParentScoped, family.ClassUserScoped:
 			needed[class] = true
 		}
 	}
 
-	out := map[Class][]scope{}
+	out := map[family.Class][]scope{}
 	for class := range needed {
 		var (
 			resolved []scope
 			err      error
 		)
 		switch class {
-		case ClassBankScoped:
+		case family.ClassBankScoped:
 			resolved, err = e.bankScopes(ctx)
-		case ClassParentScoped:
+		case family.ClassParentScoped:
 			resolved, err = e.parentScopes(ctx)
-		case ClassUserScoped:
+		case family.ClassUserScoped:
 			// User-scoped paths differ per family, so they are built per
 			// family rather than shared.
 			continue

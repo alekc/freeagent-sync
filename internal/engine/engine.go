@@ -10,6 +10,7 @@ import (
 	"github.com/alekc/freeagent"
 
 	"github.com/alekc/freeagent-sync/internal/api"
+	"github.com/alekc/freeagent-sync/internal/family"
 	"github.com/alekc/freeagent-sync/internal/store"
 	"github.com/alekc/freeagent-sync/internal/ui"
 )
@@ -177,7 +178,7 @@ type Result struct {
 	Deleted  int64
 	Requests int64
 	Outcome  string
-	Deferred map[string]Class
+	Deferred map[string]family.Class
 }
 
 // Failed lists the jobs that errored.
@@ -414,6 +415,22 @@ func (r Result) Unavailable() []FamilyResult {
 	return out
 }
 
+// sweepable reports whether a family has anything to sweep. Documents and
+// reports do not: a document is a single row that every run rewrites, and a
+// report never enters records. A family the SDK does not know is swept, since
+// it reached the archive as records like any other.
+func sweepable(name string) bool {
+	meta, ok := freeagent.Resources[name]
+	if !ok {
+		return true
+	}
+	switch family.Classify(meta) {
+	case family.ClassSingleton, family.ClassReport, family.ClassYearScoped:
+		return false
+	}
+	return true
+}
+
 // sweepFamilies marks records the far end no longer has.
 //
 // A sweep is per family, not per job, because deleted_at has no scope. A
@@ -424,13 +441,8 @@ func (e *Engine) sweepFamilies(
 	ctx context.Context, results []FamilyResult, opts Options, runID int64,
 ) {
 	for _, family := range familiesIn(results) {
-		// Documents and reports have nothing to sweep: a document is a single
-		// row that every run rewrites, and a report never enters records.
-		if meta, ok := freeagent.Resources[family]; ok {
-			switch Classify(meta) {
-			case ClassSingleton, ClassReport, ClassYearScoped:
-				continue
-			}
+		if !sweepable(family) {
+			continue
 		}
 		jobs := jobsForFamily(results, family)
 
@@ -663,7 +675,7 @@ func (e *Engine) listOptions(
 	// Ascending order makes the walk follow the cursor, which is what lets a
 	// resumed run pick up where this one stopped. Bank transactions document
 	// no sort parameter, so they are left in the server's own order.
-	if Classify(j.meta) != ClassBankScoped {
+	if family.Classify(j.meta) != family.ClassBankScoped {
 		list.Sort = "updated_at"
 	}
 	return list, false

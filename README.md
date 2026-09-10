@@ -395,6 +395,75 @@ exactly. A value with more precision than that will fail the write rather than
 be rounded quietly. The archive itself keeps the response bytes as they
 arrived, so nothing is rounded there either.
 
+## famcp: the ledger over MCP
+
+`famcp` serves the company to an MCP client over stdio, reading the live API
+through the same read-only client `fasync` uses. It takes no archive lock, so a
+session and a scheduled pull can run together.
+
+```bash
+make famcp
+./bin/famcp -account <slug>
+```
+
+It is **read-only by default**. `-allow-writes` adds exactly two tools, and
+they are bounded so that neither can change anything already recorded:
+
+- `explain_bank_transaction` explains a transaction that still has an
+  unexplained balance, optionally attaching a receipt in the same call. The
+  transaction is re-read from the API immediately before writing, and the call
+  is refused if it has since been explained, if the value runs the opposite way
+  to the unexplained amount, or if it exceeds what is left. Its category URL
+  comes from `list_categories`, which is served on its own because categories
+  arrive grouped across four envelope keys and so are not picked up by the
+  generic collection sweep.
+- `attach_receipt` adds a file to an explanation. An explanation holds up to 50,
+  and this appends, so a receipt somebody already filed cannot be replaced or
+  removed. A file whose name is already there is refused, so repeating the call
+  does not file the same receipt twice.
+
+Nothing a person already decided can be overwritten or deleted, so the worst
+case is an unwanted record rather than a lost one.
+
+The write client pins `X-Api-Version: 2026-09-01`, the documented minimum for
+the attachments endpoint. FreeAgent makes that version the default on 1
+December 2026, and stating it rather than inheriting it means that date changes
+nothing here. The endpoint does in fact answer under the SDK's older default as
+well, measured on 2026-09-05, so the pin is a statement of the contract rather
+than the thing holding the feature up. What it genuinely changes is the shape
+of an explanation, which carries a singular `attachment` under the old version
+and an `attachments` array under this one. The read path is unaffected and
+stays on the SDK's own default.
+
+What no precondition can check is the category, and a well-formed explanation
+posted to the wrong one looks like clean data. Every attempt, written or
+refused, is therefore appended to `writes.jsonl` in the data directory:
+
+```bash
+jq -r 'select(.op=="explain") | [.at, .outcome, .gross_value, .category] | @tsv' \
+  ~/.local/share/freeagent-sync/writes.jsonl
+```
+
+`marked_for_review` transactions are the ones FreeAgent guessed and a person
+has not confirmed. `list_bank_transactions` with `view=marked_for_review` finds
+them, and confirming them stays a job for the FreeAgent interface, but not for
+the reason previously given here.
+
+The SDK's struct listed the field under a read-only comment, and this file said
+FreeAgent's documentation did the same. It does not: the attributes table marks
+`type` and `capital_asset` read-only and says nothing either way about
+`marked_for_review`. Probed against the sandbox on 2026-09-05, the field is
+writable: a create that sends `marked_for_review: true` gets it back as true
+where an ordinary create reports false, a `PUT` sending false clears it, and the
+account's `marked_for_review_count` follows both ways. What does not clear it is
+an unrelated edit, so a description-only update leaves the flag standing.
+
+This tool still will not clear it, and that is now a choice rather than a
+limit. Confirming somebody's guessed explanation is a judgement about their
+books, the behaviour is undocumented and so may be withdrawn, and
+`internal/explain` issues no `PUT` at all, which is what keeps its worst case
+an unwanted record rather than a changed one.
+
 ## Roadmap
 
 | Phase | Status |
@@ -405,13 +474,15 @@ arrived, so nothing is rounded there either.
 | 3. Singletons, report snapshots, verify, ad-hoc SQL | done |
 | 4. Payroll by tax year, generated PDFs | done |
 | 5. Export, views, exact numeric projection | done |
-| 6. Write path (import, two-way) | not started, deferred by design |
+| 6. Write path (import, two-way) | not started, deferred by design. `fasync` still cannot write at all; the one exception is `famcp -allow-writes` below, which is narrow and opt-in |
+| 7. `famcp`, an MCP server over the live API | in progress; collections, bank transactions, and an opt-in write path for explanations and receipts |
 
 ## Development
 
 ```bash
 make lint test
 make fasync           # ./bin/fasync
+make famcp            # ./bin/famcp
 make cover
 ```
 
