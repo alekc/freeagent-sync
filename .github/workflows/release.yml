@@ -21,15 +21,15 @@ jobs:
       # Needed to push the container image to GHCR.
       packages: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # goreleaser reads the tag history to build the changelog, so a
           # shallow clone would produce an empty one.
           fetch-depth: 0
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
           check-latest: true
 
       # The tag is what users install, so it does not ship unless the suite
@@ -40,15 +40,15 @@ jobs:
       # buildx builds the manifest list. No QEMU: the binaries are
       # cross-compiled by Go and the Dockerfile only copies one in, so nothing
       # executes for a foreign platform.
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: goreleaser/goreleaser-action@v7
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7
         with:
           version: "~> v2"
           args: release --clean
