@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/alekc/freeagent v0.1.1
 	github.com/gofrs/flock v0.13.2
-	github.com/jedib0t/go-pretty/v6 v6.8.3
+	github.com/jedib0t/go-pretty/v6 v6.9.1
 	github.com/mattn/go-isatty v0.0.24
 	github.com/shopspring/decimal v1.6.0
 	golang.org/x/oauth2 v0.38.0
